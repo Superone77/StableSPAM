@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.nn.parameter import Parameter
 import pdb
+from .act_weight_quantization import calc_sqnr
 # ----------------------
 # 1) 量化函数
 # ----------------------
@@ -17,7 +18,7 @@ def fp4_fake_quantize(
 ): 
     x = x.clone()
     x_shape = x.shape
-    x = x.view(-1,256) # group_size = 256
+    x = x.view(-1,64) # group_size = 256
     if topk > 0:
         xabs = x.abs()      # 存储x中元素绝对值
         xabs_topk_index = xabs.topk(topk, dim=-1).indices #找到topk元素的索引
@@ -57,14 +58,15 @@ class A8Linear(torch.autograd.Function):
     def forward(ctx, x: Tensor, weight: Tensor, bias: Tensor):
         # ---- debug
         quant_x =fp4_tensor_quantize(x)
+        sqnr = calc_sqnr(x, quant_x)
         ctx.save_for_backward(quant_x,weight,bias)
         output = quant_x @ weight.t()
         if bias is not None:
             output += bias
-        return output
+        return output, sqnr
 
     @staticmethod
-    def backward(ctx, grad_output: Tensor):
+    def backward(ctx, grad_output,sqnr):
         quant_x, weight, bias = ctx.saved_tensors
 
         grad_input =  grad_output @ weight
@@ -103,18 +105,23 @@ class Qfp4Linear(nn.Linear):
         self.num_bits = num_bits
         self.group_size = group_size
         self.stochastic_round = stochastic_round
+        self.sqnr_weight = 0
+        self.sqnr_act = 0
         if weight_data is not None:
             self.weight.data.copy_(weight_data)
         if bias_data is not None and bias:
             self.bias.data.copy_(bias_data)
+            
 
     def forward(self, input: Tensor) -> Tensor:
         # pdb.set_trace()
         qweight = fp4_tensor_quantize(self.weight)
         quant_w = qweight.detach() + self.weight - self.weight.detach()
+        self.sqnr_weight = calc_sqnr(self.weight, qweight)
         # --- debug --- pdb.settrace
         # pdb.set_trace()
-        return A8Linear.apply(input, quant_w, self.bias)
+        output,self.sqnr_act = A8Linear.apply(input, quant_w, self.bias)
+        return output
 
 def prepare_model_for_fp4_training_simulation_act_weight(model, args, target_module):
 

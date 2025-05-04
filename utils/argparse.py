@@ -23,6 +23,9 @@ def parse_args(args):
     parser.add_argument("--save_dir", type=str, default=None)
     parser.add_argument("--use_hf_model", default=False, action="store_true")
     parser.add_argument("--workers", type=int, default=16)
+    ### Debug setup ###
+    parser.add_argument("--debug", default=False,action="store_true")
+    parser.add_argument("--eval_every_debug",type=int, default=50)
 
     ### Training hyperparameters ###
     parser.add_argument("--batch_size", type=int, required=True)
@@ -84,9 +87,19 @@ def parse_args(args):
     parser.add_argument("--gamma1", type=float, default=0.85) # beta1 for Adafactor, GaLore_adafactor, (Q-)GaLore-adam or SGD
     parser.add_argument("--gamma2", type=float, default=0.999) # beta2 for (Q-)GaLore-adam
     parser.add_argument("--gamma3", type=float, default=0.999) # beta2 for (Q-)GaLore-adam
+    parser.add_argument("--gamma4", type=float, default=0)
     parser.add_argument("--total_T", type=int, default=20000) # beta2 for (Q-)GaLore-adam
     parser.add_argument("--eta", type=float, default=0.5)
     parser.add_argument("--density", type=float, default=1.0)
+
+    #tensorboard
+    parser.add_argument("--set_tensorboard", action="store_true")
+    parser.add_argument("--tensorboard_dir", type=str, default=None)
+
+    #layernorm scaling
+    parser.add_argument("--layernorm_scaling", default=False,action="store_true")
+    parser.add_argument("--smoothswiglu", default=False,action="store_true")
+
 
     args = parser.parse_args(args)
     args = check_args_torchrun_main(args)

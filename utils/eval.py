@@ -1,6 +1,7 @@
 import time
 import torch
 import datasets
+import math
 from loguru import logger
 import torch.distributed as dist
 
@@ -62,4 +63,6 @@ def evaluate_model(model, tokenizer, pad_idx, global_rank, world_size, device, a
     dist.all_gather(gathered_losses, total_loss)
     total_loss = sum([t.item() for t in gathered_losses]) / world_size
 
-    return total_loss, evaluated_on_tokens
+    perplexity = math.exp(total_loss)
+
+    return total_loss, perplexity,evaluated_on_tokens

@@ -8,6 +8,12 @@ import math
 import torch
 from torch.optim.optimizer import Optimizer
 import torch.optim as optim
+from .utils import calc_sqnr
+
+# FP8 最大值（参考 IEEE754 定义）
+_FP8_E4M3_MAX = 240.0
+_FP8_E5M2_MAX = 57344.0
+
 class CosineDecay(object):
     def __init__(self, death_rate, T_max, eta_min=0.5, last_epoch=-1):
         self.sgd = optim.SGD(torch.nn.ParameterList([torch.nn.Parameter(torch.zeros(1))]), lr=death_rate)
@@ -21,10 +27,103 @@ class CosineDecay(object):
         self.step(current_step)
         return self.sgd.param_groups[0]['lr']
 
-class StableSPAM(Optimizer):
+import torch
+from typing import Literal
+
+# 无符号 e6m2：6 位指数（bias=31），2 位尾数 => max = 1.75 · 2**31
+_FP8_E6M2_MAX = 1.75 * (2 ** 31)              # ≈ 3.758 × 10⁹
+
+# ----------------------------------------------------------------------
+#   核心类
+# ----------------------------------------------------------------------
+class _QuantDequantFP8:
+    """
+    简易 FP8 量化／反量化模拟器。
+    支持
+      · 'e4m3'  (torch.float8_e4m3fn)
+      · 'e5m2'  (torch.float8_e5m2)
+      · 'e6m2'  —— **无符号** 6‑exp / 2‑man 手动实现
+    """
+    _Fmt = Literal['e4m3', 'e5m2', 'e6m2']
+
+    def __init__(self, fmt: _Fmt = 'e4m3'):
+        assert fmt in ('e4m3', 'e5m2', 'e6m2')
+        self.format = fmt
+
+        if fmt == 'e4m3':
+            self.torch_dtype = torch.float8_e4m3fn
+            self.max_val    = _FP8_E4M3_MAX
+        elif fmt == 'e5m2':
+            self.torch_dtype = torch.float8_e5m2
+            self.max_val    = _FP8_E5M2_MAX
+        else:                       # 'e6m2'
+            self.torch_dtype = None  # 手动量化
+            self.max_val    = _FP8_E6M2_MAX
+            self._bias      = (1 << 5) - 1        # 6‑bit 指数 => bias = 31
+            self._frac_bits = 2                   # 尾数位数
+            self._frac_scale= 1 << self._frac_bits
+
+    # ------------------------------------------------------------------
+    #   Public 入口
+    # ------------------------------------------------------------------
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        # if not x.is_floating_point() or x.dtype != torch.float32:
+        #     raise ValueError("只支持 float32 输入")
+
+        if self.format == 'e6m2':
+            return self._uqdq_e6m2(x)
+
+        # -------- e4m3 / e5m2 原路径 --------
+        amax = x.abs().max().item()
+        if amax == 0.0:
+            return x  # 全零直接返回
+
+        scale     = self.max_val / amax
+        x_scaled  = x * scale
+        x_down    = x_scaled.to(self.torch_dtype)     # FP8 量化
+        x_up      = x_down.to(torch.bfloat16) / scale  # 反量化
+        return x_up
+
+    # ------------------------------------------------------------------
+    #   unsigned‑e6m2 专用量化‑反量化
+    # ------------------------------------------------------------------
+    def _uqdq_e6m2(self, x: torch.Tensor) -> torch.Tensor:
+        # 负数直接截断为 0（无符号格式）
+        x_pos = torch.clamp(x, min=0.0)
+
+        amax = x_pos.max().item()
+        if amax == 0.0:
+            return x_pos    # 全零
+
+        scale = self.max_val / amax
+        y     = x_pos * scale             # 先 line‑scale 到 [0, max_val]
+
+        # === 手动 FP 量化 ===
+        # y = mantissa * 2**exp, mantissa ∈ [1,2)
+        mant, exp = torch.frexp(y)        # mant ∈ (0.5,1]
+        mant      = mant * 2.0            # → [1,2)
+        exp       = exp - 1
+
+        # 裁剪指数到 representable 区间
+        exp_clp   = torch.clamp(exp, -self._bias, self._bias)
+
+        # 2 位尾数：量化到最近的 1.xx（共 4 个刻度）
+        frac      = mant - 1.0
+        frac_q    = torch.round(frac * self._frac_scale) / self._frac_scale
+        mant_q    = 1.0 + frac_q
+        # 反构量化值
+        y_q       = torch.ldexp(mant_q, exp_clp)
+
+        # 反量化回原尺度
+        x_up      = y_q / scale
+        # 保持原输入的 shape & dtype
+        return x_up.to(torch.bfloat16)
+
+
+class StableSPAMFP8(Optimizer):
 
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0, amsgrad=False,gamma1=0.7,gamma2=0.9,gamma3=0.999,total_T=None,eta_min=0.5,update_proj_gap=1000):
+                 weight_decay=0, amsgrad=False,gamma1=0.7,gamma2=0.9,gamma3=0.999,gamma4=0.6,total_T=None,eta_min=0.5,update_proj_gap=1000,dtype: str = 'e4m3',sqnr_update_gap = 50):
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if not 0.0 <= eps:
@@ -35,10 +134,11 @@ class StableSPAM(Optimizer):
             raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
         defaults = dict(lr=lr, betas=betas, eps=eps,
                         weight_decay=weight_decay, amsgrad=amsgrad)
-        super(StableSPAM, self).__init__(params, defaults)
+        super(StableSPAMFP8, self).__init__(params, defaults)
         self.gamma1=gamma1 # 0.85 & 0.5 & 0.8,0.9
         self.gamma2=gamma2 # 0.99999 # 0.999,0.9999
-        self.theta=gamma3 # 0.999
+        self.theta=gamma3 # 0.999 
+        self.gamma4 = gamma4 #0.5 & 0.7 & 0.8
         self.total_T=total_T
         if self.total_T is not None:
             self.warmup=CosineDecay(1.0,total_T,eta_min=eta_min)   #total_T is the totoal number of update steps
@@ -46,10 +146,14 @@ class StableSPAM(Optimizer):
         if self.gamma1==-1:
             self.gamma1=betas[0]
         self.update_proj_gap=update_proj_gap
+        self.q_m1 = _QuantDequantFP8(dtype)
+        # self.q_m2 = UnsignedFPQuantizer(exp_bits=5, man_bits=3)
+        self.q_m2 = _QuantDequantFP8('e6m2')
+        self.sqnr_update_gap = sqnr_update_gap
         # print("hyperparameters:",gamma1,gamma2,theta,update_proj_gap)
 
     def __setstate__(self, state):
-        super(StableSPAM, self).__setstate__(state)
+        super(StableSPAMFP8, self).__setstate__(state)
         for group in self.param_groups:
             group.setdefault('amsgrad', False)
     @torch.no_grad()
@@ -103,6 +207,8 @@ class StableSPAM(Optimizer):
                     state['m_max_t']=0
                     # state['m_min_t']=0
                     # # state["c_norm_t"]=0
+                    state['sqnr_m'] = torch.tensor(0.0, device=p.grad.device)
+                    state['sqnr_v'] = torch.tensor(0.0, device=p.grad.device)
 
                     if amsgrad:
                         # Maintains max of all exp. moving avg. of sq. grad. values
@@ -152,12 +258,12 @@ class StableSPAM(Optimizer):
                 state["m_norm_t"],state["v_norm_t"]=m_norm_t,v_norm_t
 
                 ###############################norm scaling end#########################
-                if self.update_proj_gap!=0:
-                    if (self.total_steps % self.update_proj_gap == 0 ):
-                        state["exp_avg"] = torch.zeros_like(grad)
+                if self.update_proj_gap > 0:
+                    if (self.total_steps % self.update_proj_gap == 0):
+                        state["exp_avg"] = state["exp_avg"] * self.gamma4
                         # Exponential moving average of squared gradient values
-                        state["exp_avg_sq"] = torch.zeros_like(grad)
-                        state['step'] = 1
+                        state["exp_avg_sq"] = state["exp_avg_sq"] * self.gamma4
+                        state['step'] = int(state['step'] * self.gamma4) + 1
 
 
                 if amsgrad:
@@ -187,7 +293,13 @@ class StableSPAM(Optimizer):
                 # else:
                 grad=norm_grad
                 p.add_(grad, alpha=-step_size)
-
-
-        print(grad_norm_ori, grad_norm_after_clipping, grad_norm_after_clipping_and_normalization)
+                exp_avg_ori = exp_avg.detach()
+                exp_avg_sq_ori = exp_avg_sq.detach()
+                state["exp_avg"]    = self.q_m1(exp_avg)
+                state["exp_avg_sq"]= self.q_m2(exp_avg_sq)
+                if self.total_steps % self.sqnr_update_gap == 0:
+                    state['sqnr_m'] = calc_sqnr(exp_avg_ori, state["exp_avg"])
+                    state['sqnr_v'] = calc_sqnr(exp_avg_sq_ori, state["exp_avg_sq"])
+                
+        # print(grad_norm_ori, grad_norm_after_clipping, grad_norm_after_clipping_and_normalization)
         return loss, torch.tensor(grad_norm_after_clipping_and_normalization).sqrt()

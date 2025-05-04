@@ -8,6 +8,8 @@ import torch.nn as nn
 from tqdm import tqdm
 from loguru import logger
 import torch.distributed as dist
+from torch.utils.tensorboard import SummaryWriter
+import torch.nn.functional as F
 
 import transformers
 transformers.logging.set_verbosity_error()
@@ -16,7 +18,7 @@ from utils import *
 
 def main(args):
     set_seed(args)
-
+    
     ############ Setup DDP environment ############
     assert "LOCAL_RANK" in os.environ, "torchrun should set LOCAL_RANK"
     global_rank = int(os.environ['RANK'])
@@ -42,6 +44,15 @@ def main(args):
     ############ Initialize wandb without config (it is passed later) ############
     if (not args.unset_wandb) and global_rank == 0:
         wandb.init(project=args.project, name=args.name, entity=args.entity)
+    ############ Debug Setting ############
+    if args.debug:
+        p_prev = {}
+        tracked_layers = ['module.model.layers.0.self_attn.q_proj.weight', 
+                        'module.model.layers.0.mlp.down_proj.weight',
+                        'module.model.layers.4.self_attn.q_proj.weight', 
+                        'module.model.layers.4.mlp.down_proj.weight',
+                        'module.model.layers.7.self_attn.q_proj.weight', 
+                        'module.model.layers.7.mlp.down_proj.weight']
 
     ############ Setup training data ############
     if args.total_batch_size is not None:
@@ -139,6 +150,9 @@ def main(args):
         if not args.unset_wandb:
             wandb.config.update(run_config, allow_val_change=True)
             wandb.save(os.path.abspath(__file__), policy="now") # save current script
+        if args.set_tensorboard:
+            writer = SummaryWriter(log_dir=args.tensorboard_dir)
+            # writer = add_hparams(run_config, {})
         # fix tqdm visual length to 80 so that the progress bar
         # doesn't jump around when changing from external display to laptop
         pbar = tqdm(total=args.num_training_steps - update_step, desc="Update steps", ncols=80)
@@ -192,6 +206,8 @@ def main(args):
         logger.info(f"Trainable params with Q-GaLore enabled: {sum(p.numel() for p in trainable_params_int8) / 1_000_000:.2f}M")
     elif 'galore' in args.optimizer.lower():
         logger.info(f"Total params with GaLore enabled: {sum(p.numel() for p in galore_params) / 1_000_000:.2f}M")
+    elif 'spam' in args.optimizer.lower():
+        logger.info(f"Total params with GaLore enabled: {sum(p.numel() for p in galore_params) / 1_000_000:.2f}M")
 
     logger.info(f"Saving model to {args.save_dir} every {args.save_every} update steps")
 
@@ -217,7 +233,36 @@ def main(args):
         beginning_step = update_step
         global_step = optimizer_checkpoint["global_step"]
         logger.info(f"Optimizer and scheduler restored from {_optimizer_dir}")
+    # ##############################
+    # HOOK 
+    # ##############################
+    activation = {}
+    def make_hook(name):
+        def hook(module, input, output):
+            tensor = output[0] if isinstance(output, tuple) else output
+            activation[name] = tensor.detach()
+        return hook
 
+    sqnr_acts = {}
+    sqnr_weights = {}
+    def sqnr_hook(name):
+        def hook(module, input, output):
+            assert isinstance(output, tuple)
+            sqnr_act = output[1].items()
+            sqnr_acts[name] = sqnr_act.detach()
+            sqnr_weight = output[2].items()
+            sqnr_weights[name] = sqnr_weight.detach()
+    if args.debug:
+        for idx, layer in enumerate(model.module.model.layers):
+                layer.register_forward_hook(make_hook(f"layer_{idx}"))
+        # if args.act_quant and args.weight_quant:
+        #     for module_name, module in model.named_modules():
+        #         if isinstance(module, QLinear):
+        #             module.register_forward_hook(sqnr_hook(f"sqnr_{module_name}"))
+
+        
+    
+    
 
     # ##############################
     # TRAINING LOOP
@@ -228,6 +273,7 @@ def main(args):
     update_time = time.time()
     local_step = 0  # when continue_from is used, local_step != global_step
     total_svd_count = 0
+    # model = torch.compile(model)
 
     for batch_idx, batch in enumerate(dataloader):
 
@@ -284,8 +330,45 @@ def main(args):
                 assert False, "Wrong clipping Value"
         if global_rank == 0: pbar.update(1)
         global_grad_norm_after=torch.tensor(0.0)
+
+        # ##############################
+        #  SAVE PER-LAYER ACTIVATION
+        # ##############################
+        if args.debug and global_rank == 0:
+            if update_step % args.eval_every_debug == 0:
+                if args.fp4 or (args.act_quant and args.weight_quant):
+                    for module_name, module in model.named_modules():
+                        if isinstance(module, act_weight_quantization.QLinear) or isinstance(module, act_weight_fp4.Qfp4Linear):
+                            sqnr_act = module.sqnr_act.item()
+                            sqnr_acts[module_name] = sqnr_act
+                            sqnr_weight = module.sqnr_weight.item()
+                            sqnr_weights[module_name] = sqnr_weight
+                    writer.add_scalars(f"sqnr_weights",sqnr_weights,update_step)
+                    writer.add_scalars(f"sqnr_activations",sqnr_acts,update_step)
+
+                var_dict = {}
+                max_dict = {}
+                for name, act in activation.items():
+                    flat = act.flatten(start_dim=1) # flatten to [B, -1]
+                    var = flat.var(dim=1, unbiased=False).mean().item()
+                    var_dict[name] = var
+                    mx = flat.abs().max().item()
+                    max_dict[name] = mx
+                writer.add_scalars(f"output_variance",var_dict,update_step)
+                writer.add_scalars(f"output_absmax",max_dict,update_step)
+
+            
+
+        ################################
+        
         if not layer_wise_flag: # layer-wise updation is done during backward; requires gradient_accumulation equals 1
             if args.optimizer.lower()=='spam':
+                _,global_grad_norm_after=optimizer.step()
+            elif args.optimizer.lower()=='stablespam':
+                _,global_grad_norm_after=optimizer.step()
+            elif args.optimizer.lower()=='stablespam8bit':
+                _,global_grad_norm_after=optimizer.step()
+            elif args.optimizer.lower()=='stablespamfp8':
                 _,global_grad_norm_after=optimizer.step()
             else:
                 optimizer.step()
@@ -294,7 +377,6 @@ def main(args):
 
         update_step += 1
         update_time = time.time() - update_time
-        
         # save checkpoint by save_every
         if local_step > args.gradient_accumulation and update_step % args.save_every == 0 and global_rank == 0:
             current_model_directory = f"{args.save_dir}/model_{update_step}"
@@ -335,7 +417,7 @@ def main(args):
         # evaluation
         if update_step % args.eval_every == 0:
             logger.info(f"Performing evaluation at step {update_step}")
-            total_loss, evaluated_on_tokens = evaluate_model(
+            total_loss, perplexity,evaluated_on_tokens = evaluate_model(
                 model, tokenizer, pad_idx, global_rank, world_size, device, args
             )
             if global_rank == 0:
@@ -346,7 +428,11 @@ def main(args):
                         },
                         step=update_step,
                     )
+                if args.set_tensorboard:
+                    writer.add_scalar("final_eval_loss", total_loss, update_step)
+                    writer.add_scalar("final_eval_tokens", evaluated_on_tokens, update_step)
             logger.info(f"Eval loss at step {update_step}: {total_loss}")
+            logger.info(f"Eval perplexity at step {update_step}: {perplexity}")
 
         if not layer_wise_flag:
             lr = optimizer.param_groups[0]["lr"]
@@ -372,6 +458,54 @@ def main(args):
                     },
                     step=update_step,
                 )
+            if args.set_tensorboard:
+                writer.add_scalar("loss", loss.item(),update_step)
+                writer.add_scalar("lr", lr,update_step)
+                writer.add_scalar("tokens_seen", tokens_seen,update_step)
+                writer.add_scalar("total_svd_count", total_svd_count,update_step)
+                writer.add_scalar("throughput_tokens", tokens_in_update / update_time,update_step)
+                writer.add_scalar("throughput_examples", args.total_batch_size / update_time,update_step)
+                writer.add_scalar("grad_norm", global_grad_norm.item(),update_step)
+                writer.add_scalar("grad_norm_afterclip",global_grad_norm_after.item(),update_step)
+                writer.add_scalar("throughput_batches", batches_in_update / update_time,update_step)
+                #plot  histogram for optimizer state
+                if args.debug:
+                    if update_step % args.eval_every_debug == 0:
+                        if update_step > args.eval_every_debug:
+                            for name, p in model.named_parameters():
+                                if name in tracked_layers and name in p_prev:
+                                    update_now = (p.data - p_prev[name]).view(-1)
+                                    update_prev = (p_prev[name] - p_prev_prev[name]).view(-1) if name in p_prev_prev else update_now
+                                    cos_sim = F.cosine_similarity(update_now, update_prev,dim = 0, eps = 1e-8)
+                                    writer.add_scalar(f"cos_sim_update/{name}", cos_sim.item(),update_step)
+                                    
+                        
+                        p_prev_prev = p_prev
+                        p_prev = {name:p.data.detach().clone() for name,p in model.named_parameters() if name in tracked_layers}
+                        for name, param in model.named_parameters():
+                            if param in optimizer.state:
+                                state = optimizer.state[param]
+                                if args.optimizer.lower()=='adam' or args.optimizer.lower()=='stablespam' or args.optimizer.lower()=='stablespamfp8':
+                                    if "exp_avg" in state:
+                                        writer.add_histogram(f"/opt/exp_avg/{name}", state["exp_avg"].to(dtype=torch.float32), update_step)
+                                    if "exp_avg_sq" in state:
+                                        writer.add_histogram(f"/opt/exp_avg_sq/{name}", state["exp_avg_sq"].to(dtype=torch.float32), update_step)
+                                elif args.optimizer.lower()=='adam8bit' or args.optimizer.lower()=='stablespam8bit':
+                                    if 'state1' in state:
+                                        writer.add_histogram(f"/opt/exp_avg/{name}", state['state1'], update_step)
+                                    if 'state2' in state:
+                                        writer.add_histogram(f"/opt/exp_avg_sq/{name}", state['state2'], update_step)
+                        if args.optimizer.lower()=='stablespam8bit' or args.optimizer.lower()=='adam8bit' or args.optimizer.lower()=='adamfp8' or args.optimizer.lower()=='stablespamfp8':
+                            sqnr_m_dict = {}
+                            sqnr_v_dict = {}
+                            for name, param in model.named_parameters():
+                                if param in optimizer.state:
+                                    state = optimizer.state[param]
+                                    if state['sqnr_m'].item()>0 and 'proj' in name:
+                                        sqnr_m_dict[name] = state['sqnr_m'].item()
+                                        sqnr_v_dict[name] = state['sqnr_v'].item()
+                            writer.add_scalars(f"sqnr_m", sqnr_m_dict, update_step)
+                            writer.add_scalars(f"sqnr_v", sqnr_v_dict, update_step)
         update_time = time.time()
         # if update_step>1000:
         #     break
@@ -417,7 +551,7 @@ def main(args):
     import gc; gc.collect()
     torch.cuda.empty_cache()
 
-    total_loss, evaluated_on_tokens = evaluate_model(
+    total_loss, perplexity,evaluated_on_tokens = evaluate_model(
         model, tokenizer, pad_idx, global_rank, world_size, device, args
     )
 
@@ -429,6 +563,11 @@ def main(args):
                 },
                 step=update_step,
             )
+        if args.set_tensorboard:
+            writer.add_scalar("final_eval_loss", total_loss, update_step)
+            writer.add_scalar("final_eval_tokens", evaluated_on_tokens, update_step)
+            writer.close()
+
         logger.info(f"Final eval loss: {total_loss}")
 
     logger.info("Script finished successfully")

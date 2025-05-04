@@ -31,7 +31,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutpu
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
 from transformers.models.llama.configuration_llama import LlamaConfig
-
+from .layers import ScaledSwiglu
 
 logger = logging.get_logger(__name__)
 
@@ -877,3 +877,16 @@ class LlamaForSequenceClassification(LlamaPreTrainedModel):
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
         )
+
+class LlamaMLPScaledSwiglu(nn.Module):
+    def __init__(
+        self,
+        orig_mlp:nn.Module
+    ):
+        super().__init__()
+        self.act_fn = ScaledSwiglu()
+        self.orig_mlp = orig_mlp
+
+    def forward(self, x):
+        act_out, s = self.act_fn(self.orig_mlp.gate_proj(x)) * self.orig_mlp.up_proj(x)
+        return self.orig_mlp.down_proj(act_out) * s

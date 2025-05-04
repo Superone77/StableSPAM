@@ -7,6 +7,12 @@ from torch import Tensor
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from .dummy_quant import fake_tensor_quantize, fake_tensor_dequantize
+LOG_EPS = 1e-12
+
+def calc_sqnr(x, x_hat):
+    mse = (x - x_hat).pow(2).mean()
+    power = x.pow(2).mean()
+    return 10 * torch.log10(power / (mse + LOG_EPS))
 
 class A8Linear(torch.autograd.Function):
     quant_dim = -1
@@ -38,7 +44,7 @@ class A8Linear(torch.autograd.Function):
         # print(f"I am checking x quantization -> {x.shape} -> {qx.shape}")
 
         # Perform dequantization for forward computation
-        def forward_a_float_activation(weight, x_dtype):
+        def forward_a_float_activation(weight, x_dtype,x):
             # Dequantize with stored parameters
             float_x = fake_tensor_dequantize(
                 qx, 
@@ -50,7 +56,8 @@ class A8Linear(torch.autograd.Function):
                 topk=A8Linear.quant_topk, 
                 quant_type=A8Linear.quant_type
             )
-            return float_x @ weight.t() + bias if bias is not None else float_x @ weight.t()
+            sqnr = calc_sqnr(x, float_x)
+            return float_x @ weight.t() + bias if bias is not None else float_x @ weight.t(), sqnr
 
         # Determine x dtype
         if x.dtype == torch.half:
@@ -61,11 +68,12 @@ class A8Linear(torch.autograd.Function):
             x_dtype = 'fp32'
 
         # Apply forward computation with quantized activation
-        output = forward_a_float_activation(weight, x_dtype)
-        return output
+        output,sqnr = forward_a_float_activation(weight, x_dtype,x)
+        
+        return output,sqnr
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output, sqnr):
         """
         Backward pass with dequantized activations.
         """
@@ -132,12 +140,15 @@ def _quantize_tensor(w, q_group_size=-1, n_bit=4):
 
 class QLinear(nn.Linear):
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                device='cpu', dtype=None, weight_data=None, bias_data=None, num_bits=4, group_size=256, stochastic_round=True,topk=None) -> None:
+                device='cpu', dtype=None, weight_data=None, bias_data=None, num_bits=4, group_size=256, stochastic_round=True,topk=None, warm_up_step = 0, warm_up_bit = 8, update_proj_gap = 2000) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__(in_features, out_features, bias)
         self.in_features = in_features
         self.out_features = out_features
         self.weight = Parameter(torch.empty((out_features, in_features)))
+        self.sqnr_weight = 0
+        self.sqnr_act = 0
+        self.warm_up_step = warm_up_step
 
         if bias:
             self.bias = Parameter(torch.empty(out_features))
@@ -163,6 +174,12 @@ class QLinear(nn.Linear):
         A8Linear.quant_topk = 2
 
     def forward(self, input: Tensor) -> Tensor:
+        
+        if self.warm_up_step > 0:
+            A8Linear.quant_bit = self.warm_up_bit
+            self.warm_up_step -= 1
+        else:
+            A8Linear.quant_bit = self.num_bits
         qweight, scales, zeros = _quantize_tensor(self.weight, q_group_size=self.group_size, n_bit=self.num_bits)
         # dequantize to Bfloat16
         qweight = qweight.to(input.dtype).reshape(-1, self.group_size)
@@ -170,7 +187,11 @@ class QLinear(nn.Linear):
         qweight = qweight.reshape(self.weight.shape)
         # STE backward
         qweight = qweight.detach() + self.weight - self.weight.detach()
-        output = A8Linear.apply(input, qweight, self.bias)
+        output,self.sqnr_act = A8Linear.apply(input, qweight, self.bias)
+        self.sqnr_weight = calc_sqnr(self.weight, qweight)
+        # if self.sqnr_weight < 17:
+        #     self.group_size = self.group_size/2
+        #     print(f'new group size: {self.group_size}')            
         # output = input @ qweight.t()
         # if self.bias is not None:
         #     output += self.bias
