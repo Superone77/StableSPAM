@@ -4,52 +4,43 @@ import math
 import torch.nn.functional as F
 from hadamard_transform import hadamard_transform
 
-def outside_hadamard_transform(x, scale=1.0):
-    return hadamard_transform(x) * scale
+import math
+import torch
+import torch.nn.functional as F
+from typing import Union, Tuple
 
-
-def fast_hadamard_transform(x, scale=1.0):
+def outside_hadamard_transform(
+    x: torch.Tensor,
+    scale: float | torch.Tensor = 1.0
+) -> torch.Tensor:
     """
-    Fast implementation of Hadamard transform using recursive approach.
-    This is more efficient than the naive matrix multiplication method.
-    
+    调用 hadamard_transform，使其行为与 hadamard_transform_ref 等价。
+
     Args:
-        x (torch.Tensor): Input tensor of shape (..., dim) where dim is the dimension to transform
-        scale (float, optional): Scaling factor to apply after transformation. Defaults to 1.0.
-    
+        x: (..., dim) 任意 batch 形状，最后一维可以不是 2 的整数次幂
+        scale: ref 中的可选缩放因子
     Returns:
-        torch.Tensor: Transformed tensor of the same shape as input
+        (..., dim)   与 hadamard_transform_ref(x, scale) 相同的张量
     """
-    # Store original shape and dimension
-    x_shape = x.shape
-    dim = x.shape[-1]
-    
-    # Reshape to 2D for easier processing
-    x = x.reshape(-1, dim)
-    
-    # Calculate the next power of 2 for padding
+    orig_shape: Tuple[int, ...] = x.shape
+    dim = orig_shape[-1]
+
+    # 1) ref 的做法：pad 到 2**k
     log_dim = math.ceil(math.log2(dim))
-    dim_padded = 2 ** log_dim
-    
-    # Pad the input if dimension is not a power of 2
+    dim_padded = 1 << log_dim  # 2**log_dim
     if dim != dim_padded:
         x = F.pad(x, (0, dim_padded - dim))
-    
-    # Perform fast Hadamard transform
-    n = dim_padded
-    while n > 1:
-        half = n // 2
-        # Reshape for butterfly operations
-        x = x.view(-1, half, 2)
-        # Perform butterfly operations
-        x = torch.cat([x[:, :, 0] + x[:, :, 1], x[:, :, 0] - x[:, :, 1]], dim=1)
-        n = half
-    
-    # Apply scaling factor
-    x = x * scale
-    
-    # Remove padding and restore original shape
-    return x[..., :dim].reshape(*x_shape)
+
+    # 2) 调用已实现的快速、归一化 Hadamard
+    y = hadamard_transform(x)  # 归一化：H/√dim_padded
+
+    # 3) 把归一化因子还原，并乘以 scale
+    y = y * (scale * math.sqrt(dim_padded))
+
+    # 4) 切回原始维度并保持 batch 形状
+    return y[..., :dim].reshape(orig_shape)
+
+
 
 def naive_hadamard_transform_with_scale(x, scale=1.0):
     """
@@ -105,65 +96,42 @@ if __name__ == "__main__":
     print("\nTest 1: Basic test with power of 2 dimension")
     x1 = torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.float32)
     out1_naive = naive_hadamard_transform_with_scale(x1)
-    out1_fast = fast_hadamard_transform(x1)
     out1_outside = outside_hadamard_transform(x1)
     print("Input:", x1)
     print("Naive Output:", out1_naive)
-    print("Fast Output:", out1_fast)
     print("Outside Output:", out1_outside)
-    print("Are all outputs equal?", torch.allclose(out1_naive, out1_fast) and torch.allclose(out1_naive, out1_outside))
-    print("Shape:", out1_fast.shape)
+    print("Are all outputs equal?", torch.allclose(out1_naive, out1_outside))
 
-    # Test 2: Test with non-power of 2 dimension
-    print("\nTest 2: Test with non-power of 2 dimension")
-    x2 = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32)
-    out2_naive = naive_hadamard_transform_with_scale(x2)
-    out2_fast = fast_hadamard_transform(x2)
-    out2_outside = outside_hadamard_transform(x2)
-    print("Input:", x2)
-    print("Naive Output:", out2_naive)
-    print("Fast Output:", out2_fast)
-    print("Outside Output:", out2_outside)
-    print("Are all outputs equal?", torch.allclose(out2_naive, out2_fast) and torch.allclose(out2_naive, out2_outside))
-    print("Shape:", out2_fast.shape)
 
     # Test 3: Test with scaling factor
     print("\nTest 3: Test with scaling factor")
     x3 = torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.float32)
     out3_naive = naive_hadamard_transform_with_scale(x3, scale=0.5)
-    out3_fast = fast_hadamard_transform(x3, scale=0.5)
     out3_outside = outside_hadamard_transform(x3, scale=0.5)
     print("Input:", x3)
     print("Naive Output (scaled by 0.5):", out3_naive)
-    print("Fast Output (scaled by 0.5):", out3_fast)
     print("Outside Output (scaled by 0.5):", out3_outside)
-    print("Are all outputs equal?", torch.allclose(out3_naive, out3_fast) and torch.allclose(out3_naive, out3_outside))
+    print("Are all outputs equal?", torch.allclose(out3_naive, out3_outside))
 
     # Test 4: Test with batch processing
     print("\nTest 4: Test with batch processing")
     x4 = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
     out4_naive = naive_hadamard_transform_with_scale(x4)
-    out4_fast = fast_hadamard_transform(x4)
     out4_outside = outside_hadamard_transform(x4)
     print("Input:", x4)
     print("Naive Output:", out4_naive)
-    print("Fast Output:", out4_fast)
     print("Outside Output:", out4_outside)
-    print("Are all outputs equal?", torch.allclose(out4_naive, out4_fast) and torch.allclose(out4_naive, out4_outside))
-    print("Shape:", out4_fast.shape)
+    print("Are all outputs equal?"  ,torch.allclose(out4_naive, out4_outside))
 
     # Test 5: Test with larger dimension
     print("\nTest 5: Test with larger dimension")
     x5 = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]], dtype=torch.float32)
     out5_naive = naive_hadamard_transform_with_scale(x5)
-    out5_fast = fast_hadamard_transform(x5)
     out5_outside = outside_hadamard_transform(x5)
     print("Input:", x5)
     print("Naive Output:", out5_naive)
-    print("Fast Output:", out5_fast)
     print("Outside Output:", out5_outside)
-    print("Are all outputs equal?", torch.allclose(out5_naive, out5_fast) and torch.allclose(out5_naive, out5_outside))
-    print("Shape:", out5_fast.shape)
+    print("Are all outputs equal?", torch.allclose(out5_naive, out5_outside))
 
     # Performance comparison
     print("\nPerformance comparison:")
@@ -177,10 +145,6 @@ if __name__ == "__main__":
     _ = naive_hadamard_transform_with_scale(x_large)
     naive_time = time.time() - start_time
     
-    # Time fast implementation
-    start_time = time.time()
-    _ = fast_hadamard_transform(x_large)
-    fast_time = time.time() - start_time
     
     # Time outside implementation
     start_time = time.time()
@@ -188,8 +152,4 @@ if __name__ == "__main__":
     outside_time = time.time() - start_time
     
     print(f"Naive implementation time: {naive_time:.4f} seconds")
-    print(f"Fast implementation time: {fast_time:.4f} seconds")
     print(f"Outside implementation time: {outside_time:.4f} seconds")
-    print(f"Speedup factor (naive/fast): {naive_time/fast_time:.2f}x")
-    print(f"Speedup factor (naive/outside): {naive_time/outside_time:.2f}x")
-    print(f"Speedup factor (fast/outside): {fast_time/outside_time:.2f}x")
