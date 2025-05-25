@@ -7,7 +7,7 @@ from scipy import integrate
 from scipy.stats import norm
 
 import sys
-from .hadamard_transformer_helper import naive_hadamard_transform_with_scale as hadamard_transform
+from .hadamard_transformer_helper import outside_hadamard_transform as hadamard_transform
 from .sqnr_utils import calc_sqnr
 
 LOG_EPS = 1e-12
