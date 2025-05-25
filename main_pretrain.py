@@ -338,7 +338,7 @@ def main(args):
             if update_step % args.eval_every_debug == 0:
                 if args.fp4 or (args.act_quant and args.weight_quant) or args.quest:
                     for module_name, module in model.named_modules():
-                        if isinstance(module, act_weight_quantization.QLinear) or isinstance(module, act_weight_fp4.Qfp4Linear) or isinstance(module, base_linear.QuantizedLinear):
+                        if isinstance(module, base_linear.QLinear) or isinstance(module, base_linear.Qfp4Linear) or isinstance(module, base_linear.QuantizedLinear):
                             sqnr_act = module.sqnr_act.item()
                             sqnr_acts[module_name] = sqnr_act
                             sqnr_weight = module.sqnr_weight.item()
