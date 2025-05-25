@@ -7,7 +7,6 @@ from scipy import integrate
 from scipy.stats import norm
 
 import sys
-sys.path.append("/projects/0/prjs1462/wanqi/repo/QuEST/src/hadamard_transform")
 from hadamard_transformer_helper import naive_hadamard_transform_with_scale as hadamard_transform
 from .sqnr_utils import calc_sqnr
 
