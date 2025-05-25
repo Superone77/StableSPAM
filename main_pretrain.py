@@ -336,15 +336,24 @@ def main(args):
         # ##############################
         if args.debug and global_rank == 0:
             if update_step % args.eval_every_debug == 0:
-                if args.fp4 or (args.act_quant and args.weight_quant):
+                if args.fp4 or (args.act_quant and args.weight_quant) or args.quest:
                     for module_name, module in model.named_modules():
-                        if isinstance(module, act_weight_quantization.QLinear) or isinstance(module, act_weight_fp4.Qfp4Linear):
+                        if isinstance(module, act_weight_quantization.QLinear) or isinstance(module, act_weight_fp4.Qfp4Linear) or isinstance(module, base_linear.QuantizedLinear):
                             sqnr_act = module.sqnr_act.item()
                             sqnr_acts[module_name] = sqnr_act
                             sqnr_weight = module.sqnr_weight.item()
                             sqnr_weights[module_name] = sqnr_weight
-                    writer.add_scalars(f"sqnr_weights",sqnr_weights,update_step)
-                    writer.add_scalars(f"sqnr_activations",sqnr_acts,update_step)
+                    if args.set_tensorboard:
+                        writer.add_scalars(f"sqnr_weights",sqnr_weights,update_step)
+                        writer.add_scalars(f"sqnr_activations",sqnr_acts,update_step)
+                    if not args.unset_wandb:
+                        wandb.log(
+                            {
+                                "sqnr_weights":     sqnr_weights,   #= writer.add_scalars
+                                "sqnr_activations": sqnr_acts
+                            },
+                            step=update_step
+                        )
 
                 var_dict = {}
                 max_dict = {}
@@ -354,8 +363,17 @@ def main(args):
                     var_dict[name] = var
                     mx = flat.abs().max().item()
                     max_dict[name] = mx
-                writer.add_scalars(f"output_variance",var_dict,update_step)
-                writer.add_scalars(f"output_absmax",max_dict,update_step)
+                if args.set_tensorboard:
+                    writer.add_scalars(f"output_variance",var_dict,update_step)
+                    writer.add_scalars(f"output_absmax",max_dict,update_step)
+                if not args.unset_wandb:
+                    wandb.log(
+                        {
+                            "output_variance": var_dict,            # 对应 writer.add_scalars
+                            "output_absmax":   max_dict
+                        },
+                        step=update_step
+                    )
 
             
 
@@ -416,6 +434,43 @@ def main(args):
 
         # evaluation
         if update_step % args.eval_every == 0:
+            if args.dynamic_sqnr:
+                if update_step % args.eval_every_sqnr == 0 and global_rank == 0:
+                    from utils.sqnr_analysis import eval_sqnr_vs_loss
+                    sqnr_res = eval_sqnr_vs_loss(
+                        fp_model=model,
+                        val_loader=val_dataloader,
+                        criterion=loss_fn,
+                        device="cuda",
+                        bits=args.sqnr_bits,       # 例如 [4,6,8]
+                        groups=args.sqnr_groups,   # 例如 [32,64,128]
+                        max_batches=args.sqnr_batches
+                    )
+
+                    for (bit, grp), d in sqnr_res.items():
+                        tag_prefix = f"sqnr_eval/bit{bit}_g{grp}"
+                        if args.set_tensorboard:
+                            writer.add_scalar(f"{tag_prefix}/loss",  d["loss"],  update_step)
+                            writer.add_scalar(f"{tag_prefix}/sqnr",  d["sqnr_overall"], update_step)
+                        if not args.unset_wandb:
+                            wandb.log({
+                                f"{tag_prefix}/loss": d["loss"],
+                                f"{tag_prefix}/sqnr": d["sqnr_overall"]
+                                },
+                                step=update_step,
+                            )
+                        
+                        # 可选：逐层
+                        for ln, v in d["sqnr_per_layer"].items():
+                            if args.set_tensorboard:
+                                writer.add_scalar(f"{tag_prefix}/layer_{ln}", v, update_step)
+                            if not args.unset_wandb:
+                                wandb.log({
+                                    f"{tag_prefix}/layer_{ln}": v,
+                                    },
+                                    step=update_step,
+                                )
+
             logger.info(f"Performing evaluation at step {update_step}")
             total_loss, perplexity,evaluated_on_tokens = evaluate_model(
                 model, tokenizer, pad_idx, global_rank, world_size, device, args
@@ -431,6 +486,7 @@ def main(args):
                 if args.set_tensorboard:
                     writer.add_scalar("final_eval_loss", total_loss, update_step)
                     writer.add_scalar("final_eval_tokens", evaluated_on_tokens, update_step)
+                
             logger.info(f"Eval loss at step {update_step}: {total_loss}")
             logger.info(f"Eval perplexity at step {update_step}: {perplexity}")
 
@@ -469,43 +525,59 @@ def main(args):
                 writer.add_scalar("grad_norm_afterclip",global_grad_norm_after.item(),update_step)
                 writer.add_scalar("throughput_batches", batches_in_update / update_time,update_step)
                 #plot  histogram for optimizer state
-                if args.debug:
-                    if update_step % args.eval_every_debug == 0:
-                        if update_step > args.eval_every_debug:
-                            for name, p in model.named_parameters():
-                                if name in tracked_layers and name in p_prev:
-                                    update_now = (p.data - p_prev[name]).view(-1)
-                                    update_prev = (p_prev[name] - p_prev_prev[name]).view(-1) if name in p_prev_prev else update_now
-                                    cos_sim = F.cosine_similarity(update_now, update_prev,dim = 0, eps = 1e-8)
+            if args.debug:
+                if update_step % args.eval_every_debug == 0:
+                    if update_step > args.eval_every_debug:
+                        for name, p in model.named_parameters():
+                            if name in tracked_layers and name in p_prev:
+                                update_now = (p.data - p_prev[name]).view(-1)
+                                update_prev = (p_prev[name] - p_prev_prev[name]).view(-1) if name in p_prev_prev else update_now
+                                cos_sim = F.cosine_similarity(update_now, update_prev,dim = 0, eps = 1e-8)
+                                if args.set_tensorboard:
                                     writer.add_scalar(f"cos_sim_update/{name}", cos_sim.item(),update_step)
-                                    
-                        
-                        p_prev_prev = p_prev
-                        p_prev = {name:p.data.detach().clone() for name,p in model.named_parameters() if name in tracked_layers}
+                                if not args.unset_wandb:
+                                    wandb.log({f"cos_sim_update/{name}": cos_sim.item()}, step=update_step)
+
+                                
+                    
+                    p_prev_prev = p_prev
+                    p_prev = {name:p.data.detach().clone() for name,p in model.named_parameters() if name in tracked_layers}
+                    histograms = {}
+                    for name, param in model.named_parameters():
+                        if param in optimizer.state:
+                            state = optimizer.state[param]
+                            opt = args.optimizer.lower()
+                            def _add_hist(key, tensor):
+                                histograms[f"/opt/{key}/{name}"] = wandb.Histogram(tensor.float().cpu())
+                            if opt in {"adam", "stablespam", "stablespamfp8"}:
+                                if "exp_avg" in state:
+                                    if not args.unset_wandb:
+                                        if "exp_avg"   in state: _add_hist("exp_avg",   state["exp_avg"])
+                                        if "exp_avg_sq" in state: _add_hist("exp_avg_sq", state["exp_avg_sq"])
+                                    if args.set_tensorboard:
+                                        if "exp_avg"   in state: writer.add_histogram(f"/opt/exp_avg/{name}", state["exp_avg"].to(dtype=torch.float32), update_step)
+                                        if "exp_avg_sq" in state: writer.add_histogram(f"/opt/exp_avg_sq/{name}", state["exp_avg_sq"].to(dtype=torch.float32), update_step)
+                            elif opt in {"adam8bit", "stablespam8bit"}:
+                                if not args.unset_wandb:
+                                    if "state1" in state: _add_hist("exp_avg",   state["state1"])
+                                    if "state2" in state: _add_hist("exp_avg_sq", state["state2"])
+                                if args.set_tensorboard:
+                                        if "state1" in state: writer.add_histogram(f"/opt/exp_avg/{name}", state['state1'], update_step)
+                                        if "state2" in state: writer.add_histogram(f"/opt/exp_avg_sq/{name}", state['state2'], update_step)
+                    if opt in {"stablespam8bit", "adam8bit", "adamfp8", "stablespamfp8"}:
+                        sqnr_m_dict = {}
+                        sqnr_v_dict = {}
                         for name, param in model.named_parameters():
                             if param in optimizer.state:
                                 state = optimizer.state[param]
-                                if args.optimizer.lower()=='adam' or args.optimizer.lower()=='stablespam' or args.optimizer.lower()=='stablespamfp8':
-                                    if "exp_avg" in state:
-                                        writer.add_histogram(f"/opt/exp_avg/{name}", state["exp_avg"].to(dtype=torch.float32), update_step)
-                                    if "exp_avg_sq" in state:
-                                        writer.add_histogram(f"/opt/exp_avg_sq/{name}", state["exp_avg_sq"].to(dtype=torch.float32), update_step)
-                                elif args.optimizer.lower()=='adam8bit' or args.optimizer.lower()=='stablespam8bit':
-                                    if 'state1' in state:
-                                        writer.add_histogram(f"/opt/exp_avg/{name}", state['state1'], update_step)
-                                    if 'state2' in state:
-                                        writer.add_histogram(f"/opt/exp_avg_sq/{name}", state['state2'], update_step)
-                        if args.optimizer.lower()=='stablespam8bit' or args.optimizer.lower()=='adam8bit' or args.optimizer.lower()=='adamfp8' or args.optimizer.lower()=='stablespamfp8':
-                            sqnr_m_dict = {}
-                            sqnr_v_dict = {}
-                            for name, param in model.named_parameters():
-                                if param in optimizer.state:
-                                    state = optimizer.state[param]
-                                    if state['sqnr_m'].item()>0 and 'proj' in name:
-                                        sqnr_m_dict[name] = state['sqnr_m'].item()
-                                        sqnr_v_dict[name] = state['sqnr_v'].item()
+                                if state['sqnr_m'].item()>0 and 'proj' in name:
+                                    sqnr_m_dict[name] = state['sqnr_m'].item()
+                                    sqnr_v_dict[name] = state['sqnr_v'].item()
+                        if args.set_tensorboard:
                             writer.add_scalars(f"sqnr_m", sqnr_m_dict, update_step)
                             writer.add_scalars(f"sqnr_v", sqnr_v_dict, update_step)
+                        if not args.unset_wandb:
+                            wandb.log({"sqnr_m": sqnr_m_dict, "sqnr_v": sqnr_v_dict}, step=update_step)
         update_time = time.time()
         # if update_step>1000:
         #     break

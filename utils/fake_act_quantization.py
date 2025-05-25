@@ -156,6 +156,12 @@ class QLinear(nn.Linear):
     def forward(self, input: Tensor) -> Tensor:
         output = A8Linear.apply(input, self.weight, self.bias)
         return output
+    
+    def change_quant_bit(num_bits):
+        A8Linear.quant_bit = num_bits
+    
+    def change_quant_group_size(group_size):
+        A8Linear.quant_group_size = group_size
 
 def prepare_model_for_act_int8_training_simulation(model, args, target_module):
 

@@ -1,3 +1,4 @@
 galore_torch/__pycache__/
 utils/__pycache__/
-*.py[cod]
+*.pyc
+.DS_Store

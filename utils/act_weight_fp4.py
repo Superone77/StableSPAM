@@ -122,6 +122,7 @@ class Qfp4Linear(nn.Linear):
         # pdb.set_trace()
         output,self.sqnr_act = A8Linear.apply(input, quant_w, self.bias)
         return output
+    
 
 def prepare_model_for_fp4_training_simulation_act_weight(model, args, target_module):
 

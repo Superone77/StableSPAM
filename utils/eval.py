@@ -7,6 +7,12 @@ import torch.distributed as dist
 
 from .training_utils import collate_fn, batch_fn
 
+def layer_sqnr(fp: torch.Tensor, q: torch.Tensor) -> float:
+    """单层 SQNR = 10 log10( E[x²] / E[(x − x̂)²] )."""
+    s2  = fp.pow(2).mean().item() + 1e-12
+    n2  = (fp - q).pow(2).mean().item() + 1e-12
+    return 10 * math.log10(s2 / n2)
+
 @torch.no_grad()
 def evaluate_model(model, tokenizer, pad_idx, global_rank, world_size, device, args):
     _time = time.time()

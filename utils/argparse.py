@@ -3,6 +3,8 @@ import torch
 import argparse
 from loguru import logger
 from datetime import datetime
+from .base_linear import QUANTIZER_CLASSES
+import json
 
 def parse_args(args):
     parser = argparse.ArgumentParser()
@@ -55,6 +57,13 @@ def parse_args(args):
     parser.add_argument("--unset_wandb", action="store_true")
     parser.add_argument("--entity", type=str, default=None)
 
+    ##sqnr
+    parser.add_argument("--dynamic_sqnr", action="store_true")
+    parser.add_argument("--eval_every_sqnr", type=int, default=200)
+    parser.add_argument("--sqnr_bits",       nargs="+", type=int, default=[4,6,8])
+    parser.add_argument("--sqnr_groups",     nargs="+", type=int, default=[32,64,128])
+    parser.add_argument("--sqnr_batches",    type=int, default=50)
+
 
     ### Adaptive optimization hyperparameters ###
     parser.add_argument("--beta1", type=float, default=0.9) # beta1 for Adafactor, GaLore_adafactor, (Q-)GaLore-adam or SGD
@@ -100,6 +109,25 @@ def parse_args(args):
     parser.add_argument("--layernorm_scaling", default=False,action="store_true")
     parser.add_argument("--smoothswiglu", default=False,action="store_true")
 
+    # Quantization
+    parser.add_argument("--quest", default=False,action="store_true")
+    parser.add_argument(
+        "--w-quant", type=str, default="NoQuantizer", choices=QUANTIZER_CLASSES.keys()
+    )
+    
+    parser.add_argument(
+        "--w-quant-kwargs",
+        type=json.loads,
+        default="{}",
+    )
+    parser.add_argument(
+        "--a-quant", type=str, default="NoQuantizer", choices=QUANTIZER_CLASSES.keys()
+    )
+    parser.add_argument(
+        "--a-quant-kwargs",
+        type=json.loads,
+        default="{}",
+    )
 
     args = parser.parse_args(args)
     args = check_args_torchrun_main(args)

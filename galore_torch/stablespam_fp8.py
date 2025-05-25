@@ -47,7 +47,7 @@ class _QuantDequantFP8:
     _Fmt = Literal['e4m3', 'e5m2', 'e6m2']
 
     def __init__(self, fmt: _Fmt = 'e4m3'):
-        assert fmt in ('e4m3', 'e5m2', 'e6m2')
+        assert fmt in ('e4m3', 'e5m2', 'e6m2','none')
         self.format = fmt
 
         if fmt == 'e4m3':
@@ -69,7 +69,8 @@ class _QuantDequantFP8:
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         # if not x.is_floating_point() or x.dtype != torch.float32:
         #     raise ValueError("只支持 float32 输入")
-
+        if self.format == 'none':
+            return x
         if self.format == 'e6m2':
             return self._uqdq_e6m2(x)
 
@@ -89,7 +90,7 @@ class _QuantDequantFP8:
     # ------------------------------------------------------------------
     def _uqdq_e6m2(self, x: torch.Tensor) -> torch.Tensor:
         # 负数直接截断为 0（无符号格式）
-        x_pos = torch.clamp(x, min=0.0)
+        x_pos = torch.clamp(x, min=0.0).to(torch.float32)
 
         amax = x_pos.max().item()
         if amax == 0.0:
@@ -123,7 +124,7 @@ class _QuantDequantFP8:
 class StableSPAMFP8(Optimizer):
 
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0, amsgrad=False,gamma1=0.7,gamma2=0.9,gamma3=0.999,gamma4=0.6,total_T=None,eta_min=0.5,update_proj_gap=1000,dtype: str = 'e4m3',sqnr_update_gap = 50):
+                 weight_decay=0, amsgrad=False,gamma1=0.7,gamma2=0.9,gamma3=0.999,gamma4=0.6,total_T=None,eta_min=0.5,update_proj_gap=1000,m_dtype: str = 'e4m3',v_dtype: str = 'e6m2',sqnr_update_gap = 50):
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if not 0.0 <= eps:
@@ -146,9 +147,11 @@ class StableSPAMFP8(Optimizer):
         if self.gamma1==-1:
             self.gamma1=betas[0]
         self.update_proj_gap=update_proj_gap
-        self.q_m1 = _QuantDequantFP8(dtype)
+        self.q_m1 = _QuantDequantFP8(m_dtype)
         # self.q_m2 = UnsignedFPQuantizer(exp_bits=5, man_bits=3)
-        self.q_m2 = _QuantDequantFP8('e6m2')
+        
+        self.q_m2 = _QuantDequantFP8(v_dtype)
+        
         self.sqnr_update_gap = sqnr_update_gap
         # print("hyperparameters:",gamma1,gamma2,theta,update_proj_gap)
 
@@ -296,7 +299,7 @@ class StableSPAMFP8(Optimizer):
                 exp_avg_ori = exp_avg.detach()
                 exp_avg_sq_ori = exp_avg_sq.detach()
                 state["exp_avg"]    = self.q_m1(exp_avg)
-                state["exp_avg_sq"]= self.q_m2(exp_avg_sq)
+                state["exp_avg_sq"] = self.q_m2(exp_avg_sq)
                 if self.total_steps % self.sqnr_update_gap == 0:
                     state['sqnr_m'] = calc_sqnr(exp_avg_ori, state["exp_avg"])
                     state['sqnr_v'] = calc_sqnr(exp_avg_sq_ori, state["exp_avg_sq"])

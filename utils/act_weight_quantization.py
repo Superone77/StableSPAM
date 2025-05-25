@@ -14,6 +14,17 @@ def calc_sqnr(x, x_hat):
     power = x.pow(2).mean()
     return 10 * torch.log10(power / (mse + LOG_EPS))
 
+
+def sqnr_db_to_sigma2(sqnr_db: torch.Tensor | float):
+    """
+    SQNR[dB] -> σ_q^2  (噪声方差 / 信号方差)
+    """
+    if isinstance(sqnr_db, torch.Tensor):
+        sqnr_db = sqnr_db.detach()
+    # 1 / 10^(SQNR/10)
+    return 1.0 / (10.0 ** (sqnr_db / 10.0) + LOG_EPS)
+
+
 class A8Linear(torch.autograd.Function):
     quant_dim = -1
     quant_group_size = 64
@@ -189,6 +200,13 @@ class QLinear(nn.Linear):
         qweight = qweight.detach() + self.weight - self.weight.detach()
         output,self.sqnr_act = A8Linear.apply(input, qweight, self.bias)
         self.sqnr_weight = calc_sqnr(self.weight, qweight)
+        # # ----------(d) 计算 σ_q^2 ----------
+        # sigma_q2_act    = sqnr_db_to_sigma2(self.sqnr_act)
+        # sigma_q2_weight = sqnr_db_to_sigma2(self.sqnr_weight)
+
+        # # ----------(e) γ-Scaling ----------
+        # gamma = 1.0 / math.sqrt(1.0 + sigma_q2_act + sigma_q2_weight)
+        # output = output * gamma   
         # if self.sqnr_weight < 17:
         #     self.group_size = self.group_size/2
         #     print(f'new group size: {self.group_size}')            
@@ -197,6 +215,11 @@ class QLinear(nn.Linear):
         #     output += self.bias
 
         return output
+    def change_quant_bit(num_bits):
+        A8Linear.quant_bit = num_bits
+    
+    def change_quant_group_size(group_size):
+        A8Linear.quant_group_size = group_size
 
 
 def prepare_model_for_int8_training_simulation_act_weight(model, args, target_module):

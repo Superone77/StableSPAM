@@ -7,10 +7,19 @@ import datasets.distributed
 import itertools
 from loguru import logger
 from transformers import AutoTokenizer
-
+from datasets.utils.file_utils import DownloadConfig
 
 def setup_dataset(args, global_rank, world_size):
+    # download_config = DownloadConfig(resume_download=True, max_retries=10, use_etag=False, num_proc=4)
+    # data = datasets.load_dataset(
+    #     "allenai/c4", "en",
+    #     split="train[:2%]",
+    #     cache_dir="/projects/0/prjs1462/wanqi/data/c4_cache",
+    #     download_config=download_config
+    # )
     data = datasets.load_dataset("allenai/c4", "en", split="train", streaming=True)
+    
+    # data = datasets.load_dataset("allenai/c4", "en", split="train[:2%]",cache_dir="/projects/0/prjs1462/wanqi/data/c4_cache")
     # data = datasets.load_from_disk('/fsx-storygen/yuandong/c4_processed/train')
 
     seed_for_shuffle = 42 
