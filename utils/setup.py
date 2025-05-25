@@ -16,10 +16,11 @@ from .training_utils import get_scheculer
 
 from .fake_quantization import QLinear, prepare_model_for_int8_training_simulation
 from .quantization import QScaleLinear, prepare_model_for_int8_training
-from .act_weight_quantization import prepare_model_for_int8_training_simulation_act_weight
-from .act_weight_fp4 import prepare_model_for_fp4_training_simulation_act_weight
-from .base_linear import prepare_model_for_int8_training_simulation_act_weight
-from .base_linear import prepare_model_for_fp4_training_simulation_act_weight
+from .base_linear import (
+    prepare_model_for_int8_training_simulation_act_weight,
+    prepare_model_for_fp4_training_simulation_act_weight,
+    prepare_model_for_quest_training_simulation_act_weight
+)
 import bitsandbytes as bnb
 
 from .layers import ScaledLayerNorm
