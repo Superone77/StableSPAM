@@ -5,6 +5,198 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import math
 
+
+class _QuantDequantFP8:
+    """
+    简易 FP8 量化／反量化模拟器。
+    支持
+      · 'e2m5'  (2位指数，5位尾数)
+      · 'e3m4'  (3位指数，4位尾数)
+      · 'e4m3'  (4位指数，3位尾数)
+      · 'e5m2'  (5位指数，2位尾数)
+      · 'e6m1'  (6位指数，1位尾数)
+      · 'e8m0'  (8位指数，0位尾数，无符号)
+    """
+    _Fmt = Literal['e2m5', 'e3m4', 'e4m3', 'e5m2', 'e6m1', 'e8m0']
+
+    def __init__(self, fmt: _Fmt = 'e4m3'):
+        assert fmt in ('e2m5', 'e3m4', 'e4m3', 'e5m2', 'e6m1', 'e8m0')
+        self.format = fmt
+
+        # 设置指数和尾数位数
+        if fmt == 'e2m5':
+            self.exp_bits = 2
+            self.mant_bits = 5
+            self.is_unsigned = False
+        elif fmt == 'e3m4':
+            self.exp_bits = 3
+            self.mant_bits = 4
+            self.is_unsigned = False
+        elif fmt == 'e4m3':
+            self.exp_bits = 4
+            self.mant_bits = 3
+            self.is_unsigned = False
+        elif fmt == 'e5m2':
+            self.exp_bits = 5
+            self.mant_bits = 2
+            self.is_unsigned = False
+        elif fmt == 'e6m1':
+            self.exp_bits = 6
+            self.mant_bits = 1
+            self.is_unsigned = False
+        elif fmt == 'e8m0':  # 'e8m0'
+            self.exp_bits = 8
+            self.mant_bits = 0
+            self.is_unsigned = True
+        else: 
+            raise ValueError(f"Invalid format: {fmt}")  
+
+        # 计算指数偏置和最大值
+        self.exp_bias = (1 << (self.exp_bits - 1)) - 1
+        self.max_exp = (1 << self.exp_bits) - 1
+        self.min_exp = 1 - self.exp_bias
+        
+        if self.is_unsigned:
+            self.max_val = float(2 ** self.max_exp)
+        else:
+            self.max_val = (2 - 2**(-self.mant_bits)) * (2**(self.max_exp - self.exp_bias))
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        if self.format == 'none':
+            return x
+
+        if self.is_unsigned:
+            return self._quantize_unsigned(x)
+        else:
+            return self._quantize_signed(x)
+
+    def _quantize_signed(self, x: torch.Tensor) -> torch.Tensor:
+        """处理有符号格式的量化"""
+        amax = x.abs().max().item()
+        if amax == 0.0:
+            return x
+
+        scale = self.max_val / amax
+        x_scaled = x * scale
+
+        # 计算指数和尾数
+        mant, exp = torch.frexp(x_scaled)
+        mant = mant * 2.0  # 调整到[1,2)范围
+        exp = exp - 1
+
+        # 限制指数范围
+        exp = torch.clamp(exp, self.min_exp, self.max_exp)
+
+        # 量化尾数
+        frac = mant - 1.0
+        frac_q = torch.round(frac * (1 << self.mant_bits)) / (1 << self.mant_bits)
+        mant_q = 1.0 + frac_q
+
+        # 重建量化后的值
+        x_q = torch.ldexp(mant_q, exp)
+        
+        # 反量化
+        x_deq = x_q / scale
+        return x_deq
+
+    def _quantize_unsigned(self, x: torch.Tensor) -> torch.Tensor:
+        """处理无符号E8M0格式的量化"""
+        x_pos = torch.clamp(x, min=0.0)
+        amax = x_pos.max().item()
+        if amax == 0.0:
+            return x_pos
+
+        scale = self.max_val / amax
+        x_scaled = x_pos * scale
+
+        # 对于E8M0，我们只需要处理指数部分
+        _, exp = torch.frexp(x_scaled)
+        exp = exp - 1
+        exp = torch.clamp(exp, 0, self.max_exp)
+
+        # 重建量化后的值（没有尾数部分）
+        x_q = torch.ldexp(torch.ones_like(x_scaled), exp)
+        
+        # 反量化
+        x_deq = x_q / scale
+        return x_deq
+
+class _QuantDequantFP4:
+    """
+    FP4 量化／反量化模拟器。
+    支持 E2M1 格式，使用不同的block size和scaling factor格式。
+    """
+    _BlockSize = Literal[16, 32, 64, 128]
+    _ScaleFmt = Literal['e2m5', 'e3m4', 'e4m3', 'e5m2', 'e6m1', 'e8m0']
+
+    def __init__(self, block_size: _BlockSize = 32, scale_fmt: _ScaleFmt = 'e4m3'):
+        assert block_size in (16, 32, 64, 128)
+        assert scale_fmt in ('e2m5', 'e3m4', 'e4m3', 'e5m2', 'e6m1', 'e8m0')
+        
+        self.block_size = block_size
+        self.scale_fmt = scale_fmt
+        self.scale_quantizer = _QuantDequantFP8(scale_fmt)
+        
+        # FP4 (E2M1) 配置
+        self.exp_bits = 2
+        self.mant_bits = 1
+        self.exp_bias = (1 << (self.exp_bits - 1)) - 1  # 1
+        self.max_exp = (1 << self.exp_bits) - 1  # 3
+        self.min_exp = 1 - self.exp_bias  # 0
+        self.max_val = (2 - 2**(-self.mant_bits)) * (2**(self.max_exp - self.exp_bias))  # 3.5
+
+    def _quantize_block(self, x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """量化单个block的数据"""
+        x_scaled = x * scale
+        
+        # 计算指数和尾数
+        mant, exp = torch.frexp(x_scaled)
+        mant = mant * 2.0  # 调整到[1,2)范围
+        exp = exp - 1
+        
+        # 限制指数范围
+        exp = torch.clamp(exp, self.min_exp, self.max_exp)
+        
+        # 量化尾数
+        frac = mant - 1.0
+        frac_q = torch.round(frac * 2) / 2  # 1位尾数
+        mant_q = 1.0 + frac_q
+        
+        # 重建量化后的值
+        x_q = torch.ldexp(mant_q, exp)
+        
+        # 反量化
+        x_deq = x_q / scale
+        return x_deq
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        """对输入tensor进行分块量化"""
+        if x.numel() == 0:
+            return x
+            
+        # 重塑tensor以便于分块处理
+        orig_shape = x.shape
+        x_flat = x.flatten()
+        num_blocks = (x_flat.numel() + self.block_size - 1) // self.block_size
+        x_padded = torch.zeros(num_blocks * self.block_size, device=x.device)
+        x_padded[:x_flat.numel()] = x_flat
+        
+        # 重塑为blocks
+        x_blocks = x_padded.view(-1, self.block_size)
+        
+        # 计算每个block的scale
+        absmax = x_blocks.abs().max(dim=1)[0]
+        scales = self.scale_quantizer(absmax)
+        
+        # 对每个block进行量化
+        x_q_blocks = torch.stack([self._quantize_block(block, scale) 
+                                for block, scale in zip(x_blocks, scales)])
+        
+        # 恢复原始形状
+        x_q = x_q_blocks.flatten()[:x_flat.numel()].view(orig_shape)
+        return x_q
+
+
 class FPMinMaxQuantLinear(nn.Linear):
     def __init__(self,
         in_features: int,

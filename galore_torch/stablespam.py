@@ -10,6 +10,7 @@ from torch.optim.optimizer import Optimizer
 import torch.optim as optim
 from typing import Literal
 from .utils import calc_sqnr
+from .fp4 import _QuantDequantFP8, _QuantDequantFP4
 
 # FP8 最大值（参考 IEEE754 定义）
 _FP8_E4M3_MAX = 240.0
@@ -29,72 +30,6 @@ class CosineDecay(object):
         self.step(current_step)
         return self.sgd.param_groups[0]['lr']
 
-class _QuantDequantFP8:
-    """
-    简易 FP8 量化／反量化模拟器。
-    支持
-      · 'e4m3'  (torch.float8_e4m3fn)
-      · 'e5m2'  (torch.float8_e5m2)
-      · 'e6m2'  —— **无符号** 6‑exp / 2‑man 手动实现
-    """
-    _Fmt = Literal['e4m3', 'e5m2', 'e6m2']
-
-    def __init__(self, fmt: _Fmt = 'e4m3'):
-        assert fmt in ('e4m3', 'e5m2', 'e6m2','none')
-        self.format = fmt
-
-        if fmt == 'e4m3':
-            self.torch_dtype = torch.float8_e4m3fn
-            self.max_val    = _FP8_E4M3_MAX
-        elif fmt == 'e5m2':
-            self.torch_dtype = torch.float8_e5m2
-            self.max_val    = _FP8_E5M2_MAX
-        else:                       # 'e6m2'
-            self.torch_dtype = None  # 手动量化
-            self.max_val    = _FP8_E6M2_MAX
-            self._bias      = (1 << 5) - 1        # 6‑bit 指数 => bias = 31
-            self._frac_bits = 2                   # 尾数位数
-            self._frac_scale= 1 << self._frac_bits
-
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        if self.format == 'none':
-            return x
-        if self.format == 'e6m2':
-            return self._uqdq_e6m2(x)
-
-        amax = x.abs().max().item()
-        if amax == 0.0:
-            return x  # 全零直接返回
-
-        scale     = self.max_val / amax
-        x_scaled  = x * scale
-        x_down    = x_scaled.to(self.torch_dtype)     # FP8 量化
-        x_up      = x_down.to(torch.bfloat16) / scale  # 反量化
-        return x_up
-
-    def _uqdq_e6m2(self, x: torch.Tensor) -> torch.Tensor:
-        x_pos = torch.clamp(x, min=0.0).to(torch.float32)
-
-        amax = x_pos.max().item()
-        if amax == 0.0:
-            return x_pos    # 全零
-
-        scale = self.max_val / amax
-        y     = x_pos * scale             # 先 line‑scale 到 [0, max_val]
-
-        mant, exp = torch.frexp(y)        # mant ∈ (0.5,1]
-        mant      = mant * 2.0            # → [1,2)
-        exp       = exp - 1
-
-        exp_clp   = torch.clamp(exp, -self._bias, self._bias)
-
-        frac      = mant - 1.0
-        frac_q    = torch.round(frac * self._frac_scale) / self._frac_scale
-        mant_q    = 1.0 + frac_q
-        y_q       = torch.ldexp(mant_q, exp_clp)
-
-        x_up      = y_q / scale
-        return x_up.to(torch.bfloat16)
 
 class StableSPAM(Optimizer):
 
@@ -269,7 +204,7 @@ class StableSPAM(Optimizer):
 
 class StableSPAMFP8(StableSPAM):
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0, amsgrad=False,gamma1=0.7,gamma2=0.9,gamma3=0.999,gamma4=0.6,total_T=None,eta_min=0.5,update_proj_gap=1000,m_dtype: str = 'e4m3',v_dtype: str = 'e6m2',sqnr_update_gap = 50):
+                 weight_decay=0, amsgrad=False,gamma1=0.7,gamma2=0.9,gamma3=0.999,gamma4=0.6,total_T=None,eta_min=0.5,update_proj_gap=1000,m_dtype: str = 'e4m3',v_dtype: str = 'e5m2',sqnr_update_gap = 50):
         super().__init__(params, lr, betas, eps, weight_decay, amsgrad, gamma1, gamma2, gamma3, total_T, eta_min, update_proj_gap)
         self.gamma4 = gamma4
         self.q_m1 = _QuantDequantFP8(m_dtype)
@@ -562,4 +497,129 @@ class StableSPAM8bit(StableSPAM):
                     state['sqnr_v'] = calc_sqnr(v_true, v_hat)
             
         torch.cuda.synchronize()
+        return loss, torch.tensor(grad_norm_after_clipping_and_normalization).sqrt()
+
+class StableSPAMFP4(StableSPAM):
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
+                 weight_decay=0, amsgrad=False, gamma1=0.7, gamma2=0.9, gamma3=0.999,
+                 gamma4=0.6, total_T=None, eta_min=0.5, update_proj_gap=1000,
+                 block_size: int = 32, scale_fmt: str = 'e4m3', sqnr_update_gap=50):
+        super().__init__(params, lr, betas, eps, weight_decay, amsgrad, gamma1, gamma2, gamma3, 
+                        total_T, eta_min, update_proj_gap)
+        self.gamma4 = gamma4
+        self.q_m1 = _QuantDequantFP4(block_size, scale_fmt)
+        self.q_m2 = _QuantDequantFP4(block_size, scale_fmt)
+        self.sqnr_update_gap = sqnr_update_gap
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        self.total_steps += 1
+        if self.total_T is not None:
+            scale = self.warmup.get_dr(self.total_steps)
+        else:
+            scale = 1.0
+
+        grad_norm_ori = 0
+        grad_norm_after_clipping = 0
+        grad_norm_after_clipping_and_normalization = 0
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                p.data.mul_(1 - group['lr'] * group['weight_decay'])
+
+                grad = p.grad
+                grad_norm_ori += torch.norm(grad).item()
+
+                if grad.is_sparse:
+                    raise RuntimeError('Adam does not support sparse gradients, please consider SparseAdam instead')
+                amsgrad = group['amsgrad']
+
+                state = self.state[p]
+
+                if "exp_avg" not in state:
+                    state['step'] = 0
+                    state["exp_avg"] = torch.zeros_like(grad)
+                    state["exp_avg_sq"] = torch.zeros_like(grad)
+                    state["m_norm_t"] = 0
+                    state["v_norm_t"] = 0
+                    state['m_max_t'] = 0
+                    state['sqnr_m'] = torch.tensor(0.0, device=p.grad.device)
+                    state['sqnr_v'] = torch.tensor(0.0, device=p.grad.device)
+
+                    if amsgrad:
+                        state['max_exp_avg_sq'] = torch.zeros_like(p)
+
+                exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
+
+                max_gradient = torch.max(grad.abs())
+                m_max_t = state["m_max_t"]
+
+                state['step'] += 1
+
+                m_max_t = self.theta * m_max_t + (1 - self.theta) * max_gradient
+                m_max_hat = m_max_t / (1 - self.theta**state['step'])
+                
+                mask = grad.abs() > m_max_hat
+                if mask.sum() > 0:
+                    grad[mask] = grad[mask] / max_gradient * m_max_hat
+                grad_norm_after_clipping += torch.norm(grad).item()
+                state["m_max_t"] = m_max_t
+
+                grad_norm = torch.norm(grad)
+                m_norm_t, v_norm_t = state["m_norm_t"], state["v_norm_t"]
+
+                m_norm_t = self.gamma1 * scale * m_norm_t + (1 - self.gamma1 * scale) * grad_norm
+                v_norm_t = self.gamma2 * v_norm_t + (1 - self.gamma2) * grad_norm**2
+                
+                m_norm_hat = m_norm_t / (1 - (self.gamma1 * scale)**state['step'])
+                v_norm_hat = v_norm_t / (1 - self.gamma2**state['step'])
+
+                c_norm_t = m_norm_hat / (torch.sqrt(v_norm_hat) + group["eps"])
+                if grad_norm > 0:
+                    grad = grad / grad_norm * c_norm_t
+                grad_norm_after_clipping_and_normalization += torch.norm(grad).item()
+                state["m_norm_t"], state["v_norm_t"] = m_norm_t, v_norm_t
+
+                if self.update_proj_gap > 0:
+                    if (self.total_steps % self.update_proj_gap == 0):
+                        state["exp_avg"] = state["exp_avg"] * self.gamma4
+                        state["exp_avg_sq"] = state["exp_avg_sq"] * self.gamma4
+                        state['step'] = int(state['step'] * self.gamma4) + 1
+
+                if amsgrad:
+                    max_exp_avg_sq = state['max_exp_avg_sq']
+                beta1, beta2 = group['betas']
+                beta1 = beta1 * scale
+
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                if amsgrad:
+                    torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
+                    denom = (max_exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group['eps'])
+                else:
+                    denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group['eps'])
+
+                step_size = group['lr'] / bias_correction1
+
+                norm_grad = exp_avg / denom
+                grad = norm_grad
+                p.add_(grad, alpha=-step_size)
+                
+                exp_avg_ori = exp_avg.detach()
+                exp_avg_sq_ori = exp_avg_sq.detach()
+                state["exp_avg"] = self.q_m1(exp_avg)
+                state["exp_avg_sq"] = self.q_m2(exp_avg_sq)
+                if self.total_steps % self.sqnr_update_gap == 0:
+                    state['sqnr_m'] = calc_sqnr(exp_avg_ori, state["exp_avg"])
+                    state['sqnr_v'] = calc_sqnr(exp_avg_sq_ori, state["exp_avg_sq"])
+
         return loss, torch.tensor(grad_norm_after_clipping_and_normalization).sqrt()
