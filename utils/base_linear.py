@@ -11,6 +11,9 @@ from .hadamard_transformer_helper import outside_hadamard_transform as hadamard_
 from .sqnr_utils import calc_sqnr
 from .dummy_quant import fake_tensor_quantize, fake_tensor_dequantize
 
+from .quartet import FP4QuartetLinear
+from .quartet.backward import BACKWARD_SCHEMES
+
 
 LOG_EPS = 1e-12
 
@@ -1551,4 +1554,42 @@ def prepare_model_for_fp4_atw_training_simulation_act_weight(model, args, target
             new_layers = FP4ATWLinear(in_features, out_features, bias=bias)
 
             model._modules[name] = new_layers
+    return model
+
+def prepare_model_for_quartet_training_simulation_act_weight(model, args, target_module):
+    for name, module in reversed(model._modules.items()):
+        if len(list(module.children())) > 0:
+            model._modules[name] = prepare_model_for_quartet_training_simulation_act_weight(module, args, target_module)
+
+        if isinstance(module, nn.Linear):
+            if not name in target_module:
+                print('Keep in original linear layer', name, module)
+                continue
+            
+            bias_data = module.bias.data if module.bias is not None else None
+            in_features = module.in_features
+            out_features = module.out_features
+            bias = module.bias is not None
+            weight_data = module.weight.data
+            
+            # Create quantizers based on args
+            weight_quantizer = QUANTIZER_CLASSES[args.w_quant](**args.w_quant_kwargs)
+            activation_quantizer = QUANTIZER_CLASSES[args.a_quant](**args.a_quant_kwargs)
+            gradient_quantizer = QUANTIZER_CLASSES[args.g_quant](**args.g_quant_kwargs) if hasattr(args, 'g_quant') else None
+            
+            # Create backward scheme
+            backward_scheme = BACKWARD_SCHEMES[args.backward_scheme]() if hasattr(args, 'backward_scheme') else None
+            
+            new_layers = FP4QuartetLinear(
+                in_features, 
+                out_features, 
+                bias=bias,
+                weight_quantizer=weight_quantizer,
+                activation_quantizer=activation_quantizer,
+                gradient_quantizer=gradient_quantizer,
+                backward_scheme=backward_scheme
+            )
+
+            model._modules[name] = new_layers
+
     return model

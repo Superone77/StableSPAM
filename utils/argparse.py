@@ -131,6 +131,20 @@ def parse_args(args):
         type=json.loads,
         default="{}",
     )
+    parser.add_argument(
+        "--g-quant", type=str, default="NoQuantizer", choices=QUANTIZER_CLASSES.keys()
+    )
+    parser.add_argument(
+        "--g-quant-kwargs",
+        type=json.loads,
+        default="{}",
+    )
+    parser.add_argument(
+        "--backward-scheme",
+        type=str,
+        default="EW_EtX",
+        choices=["EW_EtX", "Q(E)W_Q(Et)X", "Q(E)Q(Wt)t_Q(Et)Q(Xt)t"],
+    )
 
     args = parser.parse_args(args)
     args = check_args_torchrun_main(args)
