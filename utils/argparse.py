@@ -111,6 +111,9 @@ def parse_args(args):
 
     # Quantization
     parser.add_argument("--quest", default=False,action="store_true")
+    parser.add_argument("--fp4atw", default=False,action="store_true") ## FP4 All the Way
+    parser.add_argument("--quartet", default=False,action="store_true") ## Quartet
+
     parser.add_argument(
         "--w-quant", type=str, default="NoQuantizer", choices=QUANTIZER_CLASSES.keys()
     )

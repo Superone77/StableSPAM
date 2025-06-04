@@ -19,7 +19,8 @@ from .quantization import QScaleLinear, prepare_model_for_int8_training
 from .base_linear import (
     prepare_model_for_int8_training_simulation_act_weight,
     prepare_model_for_fp4_training_simulation_act_weight,
-    prepare_model_for_quest_training_simulation_act_weight
+    prepare_model_for_quest_training_simulation_act_weight,
+    prepare_model_for_fp4_atw_training_simulation_act_weight
 )
 import bitsandbytes as bnb
 
@@ -59,6 +60,13 @@ def setup_model(args):
     #     logger.info('--'*20)
     #     logger.info('Prepare Model for Int8 Training')
     #     logger.info('--'*20)
+    if args.fp4atw:
+        print('FP4ATW training')
+        target_module = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'down_proj', 'gate_proj']
+        module = prepare_model_for_fp4_atw_training_simulation_act_weight(model,args,target_module)
+        logger.info('--'*20)
+        logger.info('Prepare Model for Activation&Weight FP4ATW Training')
+        logger.info('--'*20)
     if args.quest:
         print('Activation-Weight Quantizing')
         target_module = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'down_proj', 'gate_proj']

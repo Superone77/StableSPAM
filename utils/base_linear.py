@@ -9,6 +9,8 @@ from scipy.stats import norm
 import sys
 from .hadamard_transformer_helper import outside_hadamard_transform as hadamard_transform
 from .sqnr_utils import calc_sqnr
+from .dummy_quant import fake_tensor_quantize, fake_tensor_dequantize
+
 
 LOG_EPS = 1e-12
 
@@ -1527,4 +1529,26 @@ def prepare_model_for_quest_training_simulation_act_weight(model, args, target_m
 
             model._modules[name] = new_layers
 
+    return model
+
+from .fp4atw import FP4ATWLinear
+
+def prepare_model_for_fp4_atw_training_simulation_act_weight(model, args, target_module):
+    for name, module in reversed(model._modules.items()):
+        if len(list(module.children())) > 0:
+            model._modules[name] = prepare_model_for_fp4_atw_training_simulation_act_weight(module, args, target_module)
+
+        if isinstance(module, nn.Linear):
+            if not name in target_module:
+                print('Keep in original linear layer', name, module)
+                continue
+            
+            bias_data = module.bias.data if module.bias is not None else None
+            in_features = module.in_features
+            out_features = module.out_features
+            bias = module.bias is not None
+            weight_data = module.weight.data
+            new_layers = FP4ATWLinear(in_features, out_features, bias=bias)
+
+            model._modules[name] = new_layers
     return model

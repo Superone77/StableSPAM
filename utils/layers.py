@@ -3,6 +3,7 @@ from torch import nn
 from math import sqrt
 from typing import Optional, Tuple
 import torch.nn.functional as F
+import os
 
 class ScaledLayerNorm(nn.Module):
     """
@@ -17,17 +18,15 @@ class ScaledLayerNorm(nn.Module):
     def forward(self, x):
         return self.orig_ln(x) * self.scale
 
-class ScaledSwiglu(nn.Module):
+class ScaledSwiglu:
     def __init__(self) -> None:
-        super().__init__()
-        self.delayed = False
         self.initialized = False
         self.scale = None
     
-    def forward(self, x:torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __call__(self, x:torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = torch.chunk(x, 2, dim=-1)
 
-        if self.delayed:
+        if os.getenv('DELAYED_SCALED_SWIGLU', 'false').lower() == 'true':
             tmp = x[1].detach().abs().max(dim=-1, keepdim=True)[0]
             if self.initialized:
                 s = self.scale.clone()
@@ -38,11 +37,10 @@ class ScaledSwiglu(nn.Module):
                 self.initialized = True
             self.scale.add_(tmp)
         else:
-            s = x[1].abs().max(dim=-1, keepdim=True)[0]
-            # if os.getenv('DETACH_SCALED_SWIGLU', 'false').lower() == 'true':
-            #     s = x[1].detach().abs().max(dim=-1, keepdim=True)[0]
-            # else:
-            #     s = x[1].abs().max(dim=-1, keepdim=True)[0]
+            if os.getenv('DETACH_SCALED_SWIGLU', 'false').lower() == 'true':
+                s = x[1].detach().abs().max(dim=-1, keepdim=True)[0]
+            else:
+                s = x[1].abs().max(dim=-1, keepdim=True)[0]
         
         tmp = x[1] / s
         return F.silu(x[0]) * tmp, s

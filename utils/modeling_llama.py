@@ -19,6 +19,7 @@
 # limitations under the License.
 """ PyTorch LLaMA model."""
 import math
+import os
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -141,6 +142,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
     return q_embed, k_embed
 
 
+
 class LlamaMLP(nn.Module):
     def __init__(
         self,
@@ -152,10 +154,19 @@ class LlamaMLP(nn.Module):
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.act_fn = ACT2FN[hidden_act]
+        if os.getenv('SCALED_SWIGLU', 'false').lower() == 'true':
+            print("Setting Smooth SwiGLU")
+            self.act_fn = ScaledSwiglu() #ACT2FN[hidden_act]
+        else:
+            self.act_fn = ACT2FN[hidden_act]
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        if os.getenv('SCALED_SWIGLU', 'false').lower() == 'true':
+            inter_x,s = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+            return self.down_proj(inter_x) * s
+        else:
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
 
 
 class LlamaAttention(nn.Module):
