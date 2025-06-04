@@ -21,6 +21,7 @@ from .base_linear import (
     prepare_model_for_fp4_training_simulation_act_weight,
     prepare_model_for_quest_training_simulation_act_weight
 )
+from .quartet import prepare_model_for_quartet_training
 import bitsandbytes as bnb
 
 from .layers import ScaledLayerNorm
@@ -65,6 +66,13 @@ def setup_model(args):
         module = prepare_model_for_quest_training_simulation_act_weight(model,args,target_module)
         logger.info('--'*20)
         logger.info('Prepare Model for Activation&Weight QuESR Training')
+        logger.info('--'*20)
+    if args.quartet:
+        print('Enable Quartet quantization')
+        target_module = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'down_proj', 'gate_proj']
+        module = prepare_model_for_quartet_training(model, args, target_module)
+        logger.info('--'*20)
+        logger.info('Prepare Model for Quartet Training')
         logger.info('--'*20)
     if args.act_quant:
         print('Activation-Weight Quantizing')

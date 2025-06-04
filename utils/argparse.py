@@ -111,6 +111,7 @@ def parse_args(args):
 
     # Quantization
     parser.add_argument("--quest", default=False,action="store_true")
+    parser.add_argument("--quartet", default=False,action="store_true")
     parser.add_argument(
         "--w-quant", type=str, default="NoQuantizer", choices=QUANTIZER_CLASSES.keys()
     )
