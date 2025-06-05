@@ -49,7 +49,9 @@ def fp4_121_scaled(x:torch.Tensor,
         x_abs_scaled = x_abs / scale_per_t
 
         scale_per_b = x_abs_scaled.max(dim=-1, keepdim=True)[0]
-        down_cast = torch.ops.hpu.cast_to_fp8_v2(fp4_121_max / scale_per_b, 1.0, False, False, torch.float8_e4m3fn)[0]
+        input_tensor = fp4_121_max / scale_per_b
+        down_cast = input_tensor.to(torch.float8_e4m3fn)
+        # down_cast = torch.ops.hpu.cast_to_fp8_v2(fp4_121_max / scale_per_b, 1.0, False, False, torch.float8_e4m3fn)[0]
         up_cast = down_cast.to(scale_per_b.dtype)
         scale_per_b = up_cast
         scale_per_b = torch.where((0 < scale_per_b) * (scale_per_b < torch.inf), scale_per_b, 1.0)
@@ -113,7 +115,9 @@ def fake_quant_fp4(x:torch.Tensor,
 
 
 if __name__ == '__main__':
+
     device = torch.device('hpu')
+
     t = torch.randn([2, 32]).to(device)
     t_q = fake_quant_fp4(t, stochastic_rounding=True)
     print(t_q)

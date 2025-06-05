@@ -156,16 +156,22 @@ class LlamaMLP(nn.Module):
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         if os.getenv('SCALED_SWIGLU', 'false').lower() == 'true':
             print("Setting Smooth SwiGLU")
+            self.scaled_swiglu=True
             self.act_fn = ScaledSwiglu() #ACT2FN[hidden_act]
         else:
+            self.scaled_swiglu=False
             self.act_fn = ACT2FN[hidden_act]
 
     def forward(self, x):
-        if os.getenv('SCALED_SWIGLU', 'false').lower() == 'true':
-            inter_x,s = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
-            return self.down_proj(inter_x) * s
+        if self.scaled_swiglu==True:
+            inter_x,s = self.act_fn(self.gate_proj(x))
+            y = self.up_proj(x)
+            inter_x = inter_x * y
+            inter_x = self.down_proj(inter_x)
+            return inter_x * s 
         else:
             return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
 
 
 
