@@ -164,11 +164,10 @@ class LlamaMLP(nn.Module):
 
     def forward(self, x):
         if self.scaled_swiglu==True:
-            inter_x,s = self.act_fn(self.gate_proj(x))
-            y = self.up_proj(x)
-            inter_x = inter_x * y
+            gate_up = torch.cat([self.gate_proj(x), self.up_proj(x)], dim=-1)
+            inter_x, s = self.act_fn(gate_up)
             inter_x = self.down_proj(inter_x)
-            return inter_x * s 
+            return inter_x * s
         else:
             return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
@@ -905,5 +904,6 @@ class LlamaMLPScaledSwiglu(nn.Module):
         self.orig_mlp = orig_mlp
 
     def forward(self, x):
-        act_out, s = self.act_fn(self.orig_mlp.gate_proj(x)) * self.orig_mlp.up_proj(x)
+        gate_up = torch.cat([self.orig_mlp.gate_proj(x), self.orig_mlp.up_proj(x)], dim=-1)
+        act_out, s = self.act_fn(gate_up)
         return self.orig_mlp.down_proj(act_out) * s
