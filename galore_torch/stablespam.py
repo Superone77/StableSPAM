@@ -4,13 +4,14 @@ Impl copied from PyTorch master
 NOTE: Builtin optim.AdamW is used by the factory, this impl only serves as a Python based reference, will be removed
 someday
 """
+import os
 import math
 import torch
 from torch.optim.optimizer import Optimizer
 import torch.optim as optim
 from typing import Literal
 from .utils import calc_sqnr
-from .fp4 import _QuantDequantFP8, _QuantDequantFP4
+from .fp4 import _QuantDequantFP8, _QuantDequantFP4,fake_quant_fp4
 
 # FP8 最大值（参考 IEEE754 定义）
 _FP8_E4M3_MAX = 240.0
@@ -503,7 +504,7 @@ class StableSPAMFP4(StableSPAM):
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
                  weight_decay=0, amsgrad=False, gamma1=0.7, gamma2=0.9, gamma3=0.999,
                  gamma4=0.6, total_T=None, eta_min=0.5, update_proj_gap=1000,
-                 block_size: int = 32, scale_fmt: str = 'e4m3', sqnr_update_gap=50):
+                 block_size: int = 16, scale_fmt: str = 'e4m3', sqnr_update_gap=50):
         super().__init__(params, lr, betas, eps, weight_decay, amsgrad, gamma1, gamma2, gamma3, 
                         total_T, eta_min, update_proj_gap)
         self.gamma4 = gamma4
@@ -616,8 +617,16 @@ class StableSPAMFP4(StableSPAM):
                 
                 exp_avg_ori = exp_avg.detach()
                 exp_avg_sq_ori = exp_avg_sq.detach()
-                state["exp_avg"] = self.q_m1(exp_avg)
-                state["exp_avg_sq"] = self.q_m2(exp_avg_sq)
+                # state["exp_avg"] = self.q_m1(exp_avg)
+                # state["exp_avg_sq"] = self.q_m2(exp_avg_sq)
+                state["exp_avg"]  = fake_quant_fp4(x=exp_avg, 
+                                    stochastic_rounding=False, 
+                                    block_size=int(os.getenv('BLOCK_SIZE')), 
+                                    scale_format=os.getenv('SCALE_FORMAT'))
+                state["exp_avg_sq"] = fake_quant_fp4(x=exp_avg_sq, 
+                                            stochastic_rounding=False, 
+                                            block_size=int(os.getenv('BLOCK_SIZE')), 
+                                            scale_format=os.getenv('SCALE_FORMAT'))
                 if self.total_steps % self.sqnr_update_gap == 0:
                     state['sqnr_m'] = calc_sqnr(exp_avg_ori, state["exp_avg"])
                     state['sqnr_v'] = calc_sqnr(exp_avg_sq_ori, state["exp_avg_sq"])

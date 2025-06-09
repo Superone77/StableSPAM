@@ -388,6 +388,8 @@ def main(args):
                 _,global_grad_norm_after=optimizer.step()
             elif args.optimizer.lower()=='stablespamfp8':
                 _,global_grad_norm_after=optimizer.step()
+            elif args.optimizer.lower()=='stablespamfp4':
+                _,global_grad_norm_after=optimizer.step()
             else:
                 optimizer.step()
             scheduler.step()
@@ -564,7 +566,7 @@ def main(args):
                                 if args.set_tensorboard:
                                         if "state1" in state: writer.add_histogram(f"/opt/exp_avg/{name}", state['state1'], update_step)
                                         if "state2" in state: writer.add_histogram(f"/opt/exp_avg_sq/{name}", state['state2'], update_step)
-                    if opt in {"stablespam8bit", "adam8bit", "adamfp8", "stablespamfp8"}:
+                    if opt in {"stablespam8bit", "adam8bit", "adamfp8", "stablespamfp8", "stablespamfp4"}:
                         sqnr_m_dict = {}
                         sqnr_v_dict = {}
                         for name, param in model.named_parameters():

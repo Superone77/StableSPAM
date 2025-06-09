@@ -10,7 +10,7 @@ from .modeling_llama import LlamaForCausalLM, LlamaMLPScaledSwiglu
 from .lions import Lion as Lion_we
 
 # import bitsandbytes as bnb
-from galore_torch import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor, QGaLoreAdamW8bit, QGaLoreAdamW8bit_simulate, SPAM,StableSPAM,Adam_mini_our,StableSPAM8bit,StableSPAMFP8,Adam8bitSQNR,FP8Adam,FP8SGDMom
+from galore_torch import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor, QGaLoreAdamW8bit, QGaLoreAdamW8bit_simulate, SPAM,StableSPAM,Adam_mini_our,StableSPAM8bit,StableSPAMFP8,Adam8bitSQNR,FP8Adam,FP8SGDMom,StableSPAMFP4,FP4Adam
 
 from .training_utils import get_scheculer
 
@@ -209,6 +209,8 @@ def setup_optimization(args, model, trainable_params, param_groups, id_galore_pa
         optimizer = StableSPAM8bit(trainable_params, lr = args.lr, weight_decay = args.weight_decay,gamma1=args.gamma1,gamma2=args.gamma2,gamma3=args.gamma3,eta_min=args.eta,update_proj_gap=args.update_proj_gap,total_T=args.total_T)
     elif args.optimizer.lower() == "stablespamfp8":
         optimizer = StableSPAMFP8(trainable_params, lr = args.lr, weight_decay = args.weight_decay,gamma1=args.gamma1,gamma2=args.gamma2,gamma3=args.gamma3,gamma4 = args.gamma4,eta_min=args.eta,update_proj_gap=args.update_proj_gap,total_T=args.total_T)
+    elif args.optimizer.lower() == "stablespamfp4":
+        optimizer = StableSPAMFP4(trainable_params, lr = args.lr, weight_decay = args.weight_decay,gamma1=args.gamma1,gamma2=args.gamma2,gamma3=args.gamma3,gamma4 = args.gamma4,eta_min=args.eta,update_proj_gap=args.update_proj_gap,total_T=args.total_T)
     elif args.optimizer.lower() == "adafactor":
         args.beta1 = None if args.beta1 == 0.0 else args.beta1
         optimizer = transformers.optimization.Adafactor(
@@ -244,13 +246,15 @@ def setup_optimization(args, model, trainable_params, param_groups, id_galore_pa
         optimizer = FP8Adam(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
     elif args.optimizer.lower() == "sgdmomfp8":
         optimizer = FP8SGDMom(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
+    elif args.optimizer.lower() == "adamfp4":
+        optimizer = FP4Adam(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
     elif args.optimizer.lower() == "galore_adamw8bit":
         optimizer = GaLoreAdamW8bit(param_groups, lr=args.lr, weight_decay=args.weight_decay, betas=(args.beta1, args.beta2))
 
     elif args.optimizer.lower() == "q_galore_adamw8bit":
         if args.simulation:
             print('Using Simulation Mode')
-            optimizer = QGaLoreAdamW8bit_simulate(pa_groups, lr=args.lr, weight_decay=args.weight_decay, betas=(args.beta1, args.beta2))
+            optimizer = QGaLoreAdamW8bit_simulate(param_groups, lr=args.lr, weight_decay=args.weight_decay, betas=(args.beta1, args.beta2))
         else:
             optimizer = QGaLoreAdamW8bit(param_groups, lr=args.lr, weight_decay=args.weight_decay, betas=(args.beta1, args.beta2))
 

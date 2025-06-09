@@ -131,7 +131,7 @@ class FP4Adam(Optimizer):
                  betas=(0.9, 0.999),
                  eps: float = 1e-8,
                  weight_decay: float = 0.0,
-                 block_size: int = 32, 
+                 block_size: int = 16, 
                  scale_fmt: str = 'e4m3',
                  sqnr_update_gap = 50,
                  update_proj_gap=1000):
