@@ -13,3 +13,4 @@ from .adam_mini_ours import Adam_mini as Adam_mini_our
 from .adam_fp8 import FP8Adam,FP4Adam
 from .adam_int8 import Adam8bitSQNR
 from .SGDMom_fp8 import FP8SGDMom
+from .muon import set_muon,Muon
