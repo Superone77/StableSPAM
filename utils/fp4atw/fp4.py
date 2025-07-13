@@ -1,4 +1,5 @@
 import torch
+from .nvfp4_triton import nvfp4_forward   
 
 
 def fp4_121_positive(x:torch.Tensor, stochastic_rounding:bool=False) -> torch.Tensor:
@@ -85,7 +86,7 @@ def fp4_121_scaled(x:torch.Tensor,
     return sign * x_fp4_abs
 
 
-def fake_quant_fp4(x:torch.Tensor, 
+def fake_quant_fp4_torch(x:torch.Tensor, 
                    stochastic_rounding:bool=False, 
                    dim:int=-1, 
                    format:str='fp4_e2m1',
@@ -108,6 +109,20 @@ def fake_quant_fp4(x:torch.Tensor,
         x = x.reshape(shape[0] // block_size, shape[1] // block_size, block_size, block_size).permute(0, 2, 1, 3).reshape(shape)
     else:
         x = x.reshape(shape)
+    
+    return x
+## Triton
+def fake_quant_fp4(x:torch.Tensor, 
+                   stochastic_rounding:bool=False, 
+                   dim:int=-1, 
+                   format:str='fp4_e2m1',
+                   block_size:int=32, 
+                   scale_format:str='e8m0',
+                   grid:bool=False) -> torch.Tensor:
+    # TODO:
+    # 1) enable dim
+    # 2) enable e3m0
+    x = nvfp4_forward(x, None, stochastic_rounding)
     
     return x
 

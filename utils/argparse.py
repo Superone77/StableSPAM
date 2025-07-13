@@ -145,6 +145,7 @@ def parse_args(args):
         default="EW_EtX",
         choices=["EW_EtX", "Q(E)W_Q(Et)X", "Q(E)Q(Wt)t_Q(Et)Q(Xt)t"],
     )
+    parser.add_argument("--muonstep",    type=int, default=5)
 
     args = parser.parse_args(args)
     args = check_args_torchrun_main(args)
@@ -186,4 +187,3 @@ def check_args_torchrun_main(args):
         raise NotImplementedError("fp16 is not supported in torchrun_main.py. Use deepspeed_main.py instead (but it seems to have bugs)")
 
     return args
-

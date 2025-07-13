@@ -1,16 +1,5 @@
-import os
 import math
 import torch
-from loguru import logger
-from datasets import load_dataset
-from torch.utils.data import DataLoader, Dataset
-from transformers import (
-    Qwen2Config,
-    Qwen2ForCausalLM,
-    Qwen2Tokenizer,
-    get_cosine_schedule_with_warmup,
-)
-from tqdm import tqdm
 
 @torch.compile
 def zeropower_via_newtonschulz5(G, steps):
@@ -32,16 +21,6 @@ def zeropower_via_newtonschulz5(G, steps):
     X = X / (X.norm() + 1e-7)
     # Perform the NS iterations
     for _ in range(steps):
-        # X_q = fake_quant_fp4(X)
-        # X_T_q = fake_quant_fp4(X.T)
-        
-        # A = X_q @ X_T_q
-        # A_q = fake_quant_fp4(A)
-        # B = (
-        #     b * A + c * A @ A
-        # )  # adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
-        # B_q = fake_quant_fp4(B)
-        # X = a * X_q + B_q @ X_q
 
         A = X @ X.T
         B = (
@@ -217,7 +196,7 @@ class Muon(torch.optim.Optimizer):
         return loss
 
     
-def set_muon(model, lr=1e-3, wd=0.1):
+def set_muon(model, lr=1e-3, wd=0.1, ns_steps=5):
     muon_params = [
         p
         for name, p in model.named_parameters()
@@ -236,5 +215,6 @@ def set_muon(model, lr=1e-3, wd=0.1):
         wd=wd,
         muon_params=muon_params,
         adamw_params=adamw_params,
+        ns_steps=ns_steps
     )
-    
+

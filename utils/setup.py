@@ -11,7 +11,7 @@ from .lions import Lion as Lion_we
 
 # import bitsandbytes as bnb
 from galore_torch import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor, QGaLoreAdamW8bit, QGaLoreAdamW8bit_simulate, SPAM,StableSPAM,Adam_mini_our,StableSPAM8bit,StableSPAMFP8,Adam8bitSQNR,FP8Adam,FP8SGDMom,StableSPAMFP4,FP4Adam
-from galore_torch import Muon
+from galore_torch import set_muon
 from .training_utils import get_scheculer
 
 from .fake_quantization import QLinear, prepare_model_for_int8_training_simulation
@@ -197,19 +197,7 @@ def setup_optimization(args, model, trainable_params, param_groups, id_galore_pa
     elif args.optimizer.lower() == "adamw":
         optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
     elif args.optimizer.lower() == "muon":
-        muon_params = [
-            p
-            for name, p in model.named_parameters()
-            if p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
-        ]
-        adamw_params = [
-            p
-            for name, p in model.named_parameters()
-            if not (
-                p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
-            )
-        ]
-        optimizer = Muon(lr=args.lr, wd=args.weight_decay, muon_params=muon_params, adamw_params=adamw_params)
+        optimizer = set_muon(model, lr=args.lr, wd=args.weight_decay, ns_steps=args.muonstep)
     
     elif args.optimizer.lower() == "galore_adamw":
         optimizer = GaLoreAdamW(param_groups, lr=args.lr, weight_decay=args.weight_decay)    
